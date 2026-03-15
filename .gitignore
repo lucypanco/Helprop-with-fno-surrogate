@@ -1,41 +1,29 @@
-# Prerequisites
-*.d
+extern/build
+extern/lib
+extern/lib64
+extern/share
+extern/include
+extern/mongo-c-driver/.*
+lib/
+CMakeFiles/
+build/
+cmake_install.cmake
+HelProp
+get_HCS_distance_test
+IOTest
+ParticleTest
+libdocopt.a
+Makefile
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
 *.out
-*.app
-
-# debug information files
-*.dwo
+*.png
+*.ipynb
+*.txt
+*.bson
+*.csv
+*.dat
+*.gz
+*.log
+*.json
+*spec
+*mat
