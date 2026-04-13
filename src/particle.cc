@@ -18,6 +18,7 @@ const double particle::mp = 0.93827 * GeV;
 particle::particle() :
   A(1), Z(1),
   polarity(-1), B0(5 * nT), indexA(2), indexB(1), D0(5 * 1e22 * cm * cm / sec), rigidity0(1 * GeV / e), rk(3 * GeV / e / rigidity0),
+  A_drift(1), m_corot(0),
   Bn(B0 * AU * AU / 1.35883),
   r(AU), theta(90*deg + 1e-10), phi(1e-10), hcs(Wind(), "")
   {}
@@ -25,6 +26,7 @@ particle::particle() :
 particle::particle(const map<string, docopt::value>& args) :
   A(args.at("--A").asLong()), Z(args.at("--Z").asLong()),
   polarity(args.at("--polarity").asLong()), B0(stod(args.at("--B0").asString()) * nT), indexA(stod(args.at("--indexA").asString())), indexB(stod(args.at("--indexB").asString())), D0(stod(args.at("--D0").asString()) * 1e22 * cm * cm / sec), rigidity0(stod(args.at("--R0").asString()) * GeV / e), rk(3 * GeV / e / rigidity0),
+  A_drift(1), m_corot(stod(args.at("--m").asString())),
   Bn(B0 * AU * AU / 1.35883),
   r(AU), theta(90*deg + 1e-6), phi(1e-10), hcs(Wind(), args.at("--hcs-table").asString())
 {}
@@ -273,7 +275,7 @@ void particle::step(const string& logname, int max_step) {
               - 1 / r / sin(theta) * dkpp_dp
               - 1 / r * drkrp_dr
               ) / (r * sin(theta)) * dt
-              + dwp;
+              + dwp + m_corot * HCS::Omega * dt;
 
     dEk = 0;
     if (r >= 1 * AU && r + dr >= 1 * AU) {

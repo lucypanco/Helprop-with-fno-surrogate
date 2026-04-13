@@ -178,6 +178,7 @@ This Routine is used to simulate the modulation of particle within heliosphere.
       -R R0, --R0 R0                    Reference rigidity for the diffusion coefficient in unit GV [default: 1].
       --indexA INDEXA                   Diffusion index a [default: 1].
       --indexB INDEXB                   Diffusion index b [default: 1].
+      --m M                             Co-rotation factor in azimuthal drift [default: 0].
       --etoa ETOA                       The ekin/nucleon of TOA spectrum assigned in format min,max,nbin in GeV, it would follow the input spec if not given.
       --elis ELIS                       The ekin/nucleon of LIS spectrum assigned in format min,max,nbin in GeV, it would follow the input spec or etoa if not given.
       --sample                          If given, to store the samples to the outmatrix or not, only available for BSON format.

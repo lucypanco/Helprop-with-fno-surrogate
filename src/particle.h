@@ -15,6 +15,7 @@ class particle {
     long seed = 0;
     long fix_seed = false;
     double A_drift = 1;
+    double m_corot = 0;    // co-rotation factor in step(): dphi += m_corot * Omega * dt
 
     double boundary = 100 * Unit::AU;                                     //boundary condition in AU
     double dt = 500. * Unit::sec;                                             //time interval per step
