@@ -15,6 +15,7 @@ using namespace std;
 using namespace Unit;
 
 const double particle::mp = 0.93827 * GeV;
+const double particle::me = 5.10998e-4* GeV;
 particle::particle() :
   A(1), Z(1),
   polarity(-1), B0(5 * nT), indexA(2), indexB(1), D0(5 * 1e22 * cm * cm / sec), rigidity0(1 * GeV / e), rk(3 * GeV / e / rigidity0),
@@ -180,8 +181,17 @@ void particle::step(const string& logname, int max_step) {
     if (r > rmax) rmax = r;
     if (r > outward_bound) force_outward = false;
 
-    double E = Ek + A * mp;
-    double p2 = E * E - A * mp * A * mp;
+    double E = 0;
+    double p2 = 0;
+    if(A>0){
+      E = Ek + A * mp;
+      p2 = E * E - A * mp * A * mp;
+    }
+    else{
+      E = Ek + me;
+      p2 = E*E - me*me;
+    }
+    
     M_p = sqrt(p2);
     rigidity = M_p / (Z * e);
     V_p = M_p / E * c_speed;
@@ -323,8 +333,17 @@ void particle::step(const string& logname, int max_step) {
     }
   }
 
-  double E = Ek + A * mp;
-  double p2 = E * E - A * mp * A * mp;
+  double E = 0;
+  double p2 = 0;
+  if(A>0){
+    E = Ek + A * mp;
+    p2 = E * E - A * mp * A * mp;
+  }
+  else{
+    E = Ek + me;
+    p2 = E*E - me*me;
+  }
+
   M_p = sqrt(p2);
   rigidity = M_p / (Z * e);
 

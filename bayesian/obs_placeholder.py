@@ -9,6 +9,7 @@ import numpy as np
 from pathlib import Path
 
 from bayesian.config import M_PROTON, PROJECT_ROOT
+from bayesian.io import read_spec
 
 
 def ekin2p(ekin: float, A: int = 1) -> float:
@@ -35,8 +36,18 @@ def get_observed_data():
 def _load_from_output(path: Path):
     """Load observed spectrum from the project Output file.
 
-    Expected format: two columns (E in GeV, F in 1/GeV), space or comma separated.
+    Tries TXT format first (IO_TXT spec format: "# E F" header),
+    then CSV, then falls back to permissive two-column reading.
     """
+    for iotype in ("TXT", "CSV"):
+        try:
+            E_obs, F_obs = read_spec(str(path), iotype=iotype)
+            F_err = np.full_like(F_obs, 0.1)  # 10% fractional uncertainty as placeholder
+            return E_obs, F_obs, F_err
+        except (ValueError, IndexError):
+            continue
+
+    # Fallback: permissive two-column reading (any whitespace/comma separated)
     E, F = [], []
     with open(path) as f:
         for line in f:
@@ -61,7 +72,7 @@ def _synthetic_placeholder():
 
     # Simple power-law placeholder: F ~ 1.8 * E^-2.7
     F_obs = 1.8 * E_obs ** (-2.7)
-    F_err = np.full_like(F_obs, 0.1)  # 10% fractional uncertainty
+    F_err = np.full_like(E_obs, 0.1)  # 10% fractional uncertainty
 
     return E_obs, F_obs, F_err
 

@@ -1,160 +1,192 @@
 data {
   // Polynomial emulator coefficients
-  int<lower=0> n_coeffs;       // number of polynomial coefficients
+  int<lower=1> n_params;       // number of parameters (always 4: D0, m, B0, angle)
+  int<lower=1> n_coeffs;       // number of polynomial coefficients
   int<lower=1> n_toa;          // number of TOA energy bins
   int<lower=1> n_lis;          // number of LIS energy bins
   int<lower=0> poly_degree;    // polynomial degree
   vector[n_coeffs] coeffs[n_toa, n_lis];  // polynomial coefficients
+  int<lower=0> exp_table[n_coeffs, n_params]; // exponent table
 
   // Energy grids (GeV)
   vector[n_toa] ETOA;
   vector[n_lis] ELIS;
 
   // Observed data
-  int<lower=1> n_obs;          // number of observed data points
-  vector[n_obs] E_obs;         // observed energy bins (GeV)
-  vector[n_obs] F_obs;         // observed flux values
-  vector<lower=0>[n_obs] F_err; // fractional uncertainties (e.g. 0.1 for 10%)
+  int<lower=1> n_obs;
+  vector[n_obs] E_obs;
+  vector[n_obs] F_obs;
+  vector<lower=0>[n_obs] F_err;
 
   // LIS flux at ELIS grid points
   vector[n_lis] F_LIS;
+
+  // Fixed values and tight-prior widths for parameters not being inferred.
+  // When a parameter is inferred, its prior_sigma is set to a broad value
+  // and fixed_value is ignored.  When not inferred, prior_sigma is tiny
+  // to effectively pin the parameter at fixed_value.
+  real<lower=0> prior_mu_B0;
+  real<lower=0> prior_sigma_B0;
+  real prior_mu_angle;
+  real<lower=0> prior_sigma_angle;
 }
 
 transformed data {
-  // Proton rest mass in GeV (matches HelProp.cc)
   real m_proton = 0.938272;
-
-  // Precompute momenta from kinetic energies
   vector[n_lis] pLIS;
   vector[n_toa] pTOA;
-  vector[n_obs] p_obs;
-
-  // Polynomial feature exponents: for each coefficient index k,
-  // the exponents (d1, d2) such that feature_k = logD0^d1 * m^d2
-  int exp_d1[n_coeffs];
-  int exp_d2[n_coeffs];
+  vector[n_toa] log_ETOA;
 
   for (j in 1:n_lis)
     pLIS[j] = sqrt(ELIS[j] * (ELIS[j] + 2.0 * m_proton));
-  for (i in 1:n_toa)
+  for (i in 1:n_toa) {
     pTOA[i] = sqrt(ETOA[i] * (ETOA[i] + 2.0 * m_proton));
-  for (k in 1:n_obs)
-    p_obs[k] = sqrt(E_obs[k] * (E_obs[k] + 2.0 * m_proton));
-
-  // Build exponent table: ordered by total degree, then d1 descending
-  {
-    int idx = 1;
-    for (deg in 0:poly_degree) {
-      for (d1 in 0:deg) {
-        exp_d1[idx] = d1;
-        exp_d2[idx] = deg - d1;
-        idx += 1;
-      }
-    }
+    log_ETOA[i] = log(ETOA[i]);
   }
 }
 
 parameters {
-  real<lower=0> D0;   // diffusion coefficient (1e22 cm^2/s)
-  real m;              // co-rotation factor (dimensionless)
+  real<lower=0> D0;
+  real m_param;
+  real<lower=0> B0;
+  real angle;
 }
 
 transformed parameters {
-  real logD0 = log(D0);
+  vector[n_params] theta;
+  theta[1] = log(D0);
+  theta[2] = m_param;
+  theta[3] = B0;
+  theta[4] = angle;
 }
 
 model {
-  // Priors
-  D0 ~ lognormal(1.6, 0.7);   // center ~5, broad range
-  m ~ normal(0, 1);            // centered at 0
+  // Priors (width controlled by data for B0/angle to allow fixing them)
+  D0 ~ lognormal(1.6, 0.7);
+  m_param ~ normal(0, 1);
+  B0 ~ normal(prior_mu_B0, prior_sigma_B0);
+  angle ~ normal(prior_mu_angle, prior_sigma_angle);
 
-  // Build polynomial features for current (logD0, m)
+  // Build polynomial features for current theta
   vector[n_coeffs] phi;
-  {
-    real logD0_powers[poly_degree + 1];
-    real m_powers[poly_degree + 1];
-    logD0_powers[1] = 1.0;
-    m_powers[1] = 1.0;
-    for (d in 1:poly_degree) {
-      logD0_powers[d + 1] = logD0_powers[d] * logD0;
-      m_powers[d + 1] = m_powers[d] * m;
-    }
-    for (k in 1:n_coeffs)
-      phi[k] = logD0_powers[exp_d1[k] + 1] * m_powers[exp_d2[k] + 1];
+  for (k in 1:n_coeffs) {
+    phi[k] = 1.0;
+    for (p in 1:n_params)
+      phi[k] *= theta[p] ^ exp_table[k, p];
   }
 
-  // Evaluate polynomial to get log(weight) for each matrix element
-  // Then compute predicted TOA flux at each observed energy
-  vector[n_obs] F_pred;
-
+  // Compute log-predicted flux at each observed energy
   for (k in 1:n_obs) {
-    // Find which TOA bin this observed energy falls into (nearest neighbor)
-    int i_toa = 1;
-    real min_dist = fabs(log(E_obs[k]) - log(ETOA[1]));
-    for (i in 2:n_toa) {
-      real dist = fabs(log(E_obs[k]) - log(ETOA[i]));
-      if (dist < min_dist) {
-        min_dist = dist;
-        i_toa = i;
+    real log_E_obs = log(E_obs[k]);
+
+    // Find bracketing ETOA bins via binary search
+    int i_lo;
+    int i_hi;
+    if (log_E_obs <= log_ETOA[1]) {
+      i_lo = 1;
+      i_hi = 2;
+    } else if (log_E_obs >= log_ETOA[n_toa]) {
+      i_lo = n_toa - 1;
+      i_hi = n_toa;
+    } else {
+      int i_a = 1;
+      int i_b = n_toa;
+      while (i_b - i_a > 1) {
+        int i_mid = (i_a + i_b) / 2;
+        if (log_ETOA[i_mid] <= log_E_obs)
+          i_a = i_mid;
+        else
+          i_b = i_mid;
       }
+      i_lo = i_a;
+      i_hi = i_b;
     }
 
-    // Compute modulated flux: sum over LIS bins
-    // F_TOA = sum_i [ weight(i_toa, i_lis) * F_LIS[i_lis] / pLIS[i_lis]^2 * pTOA[i_toa]^2 ]
-    // weight is in log-space from the emulator, so exp() first
-    real flux_sum = 0.0;
+    // Log-linear interpolation weight
+    real w = (log_E_obs - log_ETOA[i_lo]) / (log_ETOA[i_hi] - log_ETOA[i_lo]);
+
+    // Compute log(flux) at bracketing bins using log_sum_exp
+    real log_flux_lo = negative_infinity();
+    real log_flux_hi = negative_infinity();
     for (j in 1:n_lis) {
-      real log_w = 0.0;
-      for (c in 1:n_coeffs)
-        log_w += coeffs[i_toa, j, c] * phi[c];
-      real w = exp(log_w);
-      flux_sum += w * F_LIS[j] / (pLIS[j] * pLIS[j]);
+      real log_w_lo = 0.0;
+      real log_w_hi = 0.0;
+      for (c in 1:n_coeffs) {
+        log_w_lo += coeffs[i_lo, j, c] * phi[c];
+        log_w_hi += coeffs[i_hi, j, c] * phi[c];
+      }
+      real log_contrib_lo = log_w_lo + log(F_LIS[j]) - 2.0 * log(pLIS[j]);
+      real log_contrib_hi = log_w_hi + log(F_LIS[j]) - 2.0 * log(pLIS[j]);
+      log_flux_lo = log_sum_exp(log_flux_lo, log_contrib_lo);
+      log_flux_hi = log_sum_exp(log_flux_hi, log_contrib_hi);
     }
-    F_pred[k] = flux_sum * pTOA[i_toa] * pTOA[i_toa];
-  }
+    log_flux_lo += 2.0 * log(pTOA[i_lo]);
+    log_flux_hi += 2.0 * log(pTOA[i_hi]);
 
-  // Log-normal likelihood (multiplicative errors)
-  for (k in 1:n_obs) {
-    real sigma = F_err[k];  // fractional uncertainty
-    target += normal_lpdf(log(F_obs[k]) | log(F_pred[k]), sigma);
+    real log_F_pred = (1 - w) * log_flux_lo + w * log_flux_hi;
+
+    // Log-normal likelihood
+    target += normal_lpdf(log(F_obs[k]) | log_F_pred, F_err[k]);
   }
 }
 
 generated quantities {
   // Posterior predictive flux at observed energies
   vector[n_obs] F_pred_gen;
+
   {
     vector[n_coeffs] phi;
-    real logD0_powers[poly_degree + 1];
-    real m_powers[poly_degree + 1];
-    logD0_powers[1] = 1.0;
-    m_powers[1] = 1.0;
-    for (d in 1:poly_degree) {
-      logD0_powers[d + 1] = logD0_powers[d] * logD0;
-      m_powers[d + 1] = m_powers[d] * m;
+    for (k in 1:n_coeffs) {
+      phi[k] = 1.0;
+      for (p in 1:n_params)
+        phi[k] *= theta[p] ^ exp_table[k, p];
     }
-    for (k in 1:n_coeffs)
-      phi[k] = logD0_powers[exp_d1[k] + 1] * m_powers[exp_d2[k] + 1];
 
     for (k in 1:n_obs) {
-      int i_toa = 1;
-      real min_dist = fabs(log(E_obs[k]) - log(ETOA[1]));
-      for (i in 2:n_toa) {
-        real dist = fabs(log(E_obs[k]) - log(ETOA[i]));
-        if (dist < min_dist) {
-          min_dist = dist;
-          i_toa = i;
+      real log_E_obs = log(E_obs[k]);
+
+      int i_lo;
+      int i_hi;
+      if (log_E_obs <= log_ETOA[1]) {
+        i_lo = 1;
+        i_hi = 2;
+      } else if (log_E_obs >= log_ETOA[n_toa]) {
+        i_lo = n_toa - 1;
+        i_hi = n_toa;
+      } else {
+        int i_a = 1;
+        int i_b = n_toa;
+        while (i_b - i_a > 1) {
+          int i_mid = (i_a + i_b) / 2;
+          if (log_ETOA[i_mid] <= log_E_obs)
+            i_a = i_mid;
+          else
+            i_b = i_mid;
         }
+        i_lo = i_a;
+        i_hi = i_b;
       }
-      real flux_sum = 0.0;
+
+      real w = (log_E_obs - log_ETOA[i_lo]) / (log_ETOA[i_hi] - log_ETOA[i_lo]);
+
+      real log_flux_lo = negative_infinity();
+      real log_flux_hi = negative_infinity();
       for (j in 1:n_lis) {
-        real log_w = 0.0;
-        for (c in 1:n_coeffs)
-          log_w += coeffs[i_toa, j, c] * phi[c];
-        real w = exp(log_w);
-        flux_sum += w * F_LIS[j] / (pLIS[j] * pLIS[j]);
+        real log_w_lo = 0.0;
+        real log_w_hi = 0.0;
+        for (c in 1:n_coeffs) {
+          log_w_lo += coeffs[i_lo, j, c] * phi[c];
+          log_w_hi += coeffs[i_hi, j, c] * phi[c];
+        }
+        real log_contrib_lo = log_w_lo + log(F_LIS[j]) - 2.0 * log(pLIS[j]);
+        real log_contrib_hi = log_w_hi + log(F_LIS[j]) - 2.0 * log(pLIS[j]);
+        log_flux_lo = log_sum_exp(log_flux_lo, log_contrib_lo);
+        log_flux_hi = log_sum_exp(log_flux_hi, log_contrib_hi);
       }
-      F_pred_gen[k] = flux_sum * pTOA[i_toa] * pTOA[i_toa];
+      log_flux_lo += 2.0 * log(pTOA[i_lo]);
+      log_flux_hi += 2.0 * log(pTOA[i_hi]);
+
+      F_pred_gen[k] = exp((1 - w) * log_flux_lo + w * log_flux_hi);
     }
   }
 }

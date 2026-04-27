@@ -39,6 +39,7 @@ class particle {
     double A = 1.;                                              //nucleon number, proton by default
     double Z = 1.;                                              //charge number, proton by default
     static const double mp;                           //rest mass of proton
+    static const double me;
 
     double r, theta, phi;                              // particle position
     double r10 = 0; 
