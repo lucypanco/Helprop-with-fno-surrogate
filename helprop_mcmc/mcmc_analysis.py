@@ -13,7 +13,7 @@ Samplers
 
 Usage
 -----
-  python mcmc_analysis.py --helprop ../HelProp --lis ../LocalProton --obs data/obs_data.dat
+  python mcmc_analysis.py --helprop ../HelProp --lis ../Proton_spectrum.txt --obs ../ProtonModulated_ekin.txt --sampler emcee --nwalkers 8 --nsteps 30 --nburn 10 --nproc 0
   python mcmc_analysis.py --sampler pt   --ntemps 10 --nwalkers 20 --nsteps 2000
   python mcmc_analysis.py --sampler emcee --nwalkers 32 --nsteps 5000
   python mcmc_analysis.py --sampler dynesty
@@ -44,6 +44,7 @@ import os
 import sys
 import time
 import numpy as np
+from multiprocessing import Pool, cpu_count
 
 from interp import LogInterp
 from helprop_runner import HelPropRunner
@@ -76,7 +77,7 @@ except ImportError:
     HAS_MPL = False
 
 # ==================================================================
-# Prior
+# Prior  (callable classes — picklable for multiprocessing)
 # ==================================================================
 
 D0_RANGE = (0.1, 50.0)
@@ -85,57 +86,96 @@ NDIM     = 2
 LABELS   = [r"$D_0\;(10^{22}\,\mathrm{cm^2/s})$", r"$m_{\mathrm{corot}}$"]
 
 
-def log_prior(theta):
-    D0, m = theta
-    if D0_RANGE[0] <= D0 <= D0_RANGE[1] and M_RANGE[0] <= m <= M_RANGE[1]:
-        return 0.0
-    return -np.inf
+class _LogPrior:
+    """Picklable uniform log-prior over (D0, m) ranges."""
+    def __init__(self, D0_range, M_range):
+        self.D0_range = D0_range
+        self.M_range = M_range
+
+    def __call__(self, theta):
+        D0, m = theta
+        if (self.D0_range[0] <= D0 <= self.D0_range[1]
+                and self.M_range[0] <= m <= self.M_range[1]):
+            return 0.0
+        return -np.inf
 
 
-def prior_transform(u):
-    """Unit-cube -> parameter space (uniform prior, for nested sampling)."""
-    D0 = D0_RANGE[0] + u[0] * (D0_RANGE[1] - D0_RANGE[0])
-    m  = M_RANGE[0]  + u[1] * (M_RANGE[1]  - M_RANGE[0])
-    return np.array([D0, m])
+class _PriorTransform:
+    """Picklable unit-cube -> (D0, m) transform for nested sampling."""
+    def __init__(self, D0_range, M_range):
+        self.D0_range = D0_range
+        self.M_range = M_range
+
+    def __call__(self, u):
+        D0 = self.D0_range[0] + u[0] * (self.D0_range[1] - self.D0_range[0])
+        m  = self.M_range[0]  + u[1] * (self.M_range[1]  - self.M_range[0])
+        return np.array([D0, m])
 
 
-# ==================================================================
-# Likelihood
-# ==================================================================
+class _LogLikelihood:
+    """Picklable log-likelihood with internal result cache."""
+    def __init__(self, runner, E_obs, F_obs, err_obs):
+        self.runner = runner
+        self.E_obs = E_obs
+        self.F_obs = F_obs
+        self.err_obs = err_obs
+        self._cache = {}
 
-def make_log_likelihood(runner, E_obs, F_obs, err_obs):
-    """Return a log-likelihood closure with an internal value cache."""
-    _cache = {}
-
-    def log_likelihood(theta):
+    def __call__(self, theta):
         D0, m = theta
         key = (round(D0, 8), round(m, 8))
-        if key in _cache:
-            return _cache[key]
+        if key in self._cache:
+            return self._cache[key]
 
-        f_mod = runner.run(D0, m)
+        f_mod = self.runner.run(D0, m)
         if f_mod is None:
-            _cache[key] = -np.inf
+            self._cache[key] = -np.inf
             return -np.inf
 
         try:
-            F_sim = f_mod(E_obs)
+            F_sim = f_mod(self.E_obs)
             if np.any(F_sim <= 0) or np.any(~np.isfinite(F_sim)):
-                _cache[key] = -np.inf
+                self._cache[key] = -np.inf
                 return -np.inf
         except (ValueError, IndexError):
-            _cache[key] = -np.inf
+            self._cache[key] = -np.inf
             return -np.inf
 
-        # Gaussian log-likelihood on log-flux (multiplicative errors)
-        sigma = err_obs / F_obs          # relative error
-        resid = (np.log(F_obs) - np.log(F_sim)) / sigma
+        sigma = self.err_obs / self.F_obs
+        resid = (np.log(self.F_obs) - np.log(F_sim)) / sigma
         ll = -0.5 * np.sum(resid ** 2)
-        _cache[key] = ll
+        self._cache[key] = ll
         return ll
 
-    log_likelihood.cache = _cache        # expose for introspection
-    return log_likelihood
+    @property
+    def cache(self):
+        return self._cache
+
+
+class _TemperedProb:
+    """Picklable tempered posterior: log_prior + beta * log_likelihood."""
+    def __init__(self, log_likelihood, log_prior, beta=1.0):
+        self._ll = log_likelihood
+        self._lp = log_prior
+        self._beta = beta
+
+    def __call__(self, theta):
+        lp = self._lp(theta)
+        if not np.isfinite(lp):
+            return -np.inf
+        return lp + self._beta * self._ll(theta)
+
+
+def make_log_prior(D0_range, M_range):
+    return _LogPrior(D0_range, M_range)
+
+
+def make_prior_transform(D0_range, M_range):
+    return _PriorTransform(D0_range, M_range)
+
+
+def make_log_likelihood(runner, E_obs, F_obs, err_obs):
+    return _LogLikelihood(runner, E_obs, F_obs, err_obs)
 
 
 # ==================================================================
@@ -154,7 +194,7 @@ class PTSampler:
     """
 
     def __init__(self, n_temps, n_walkers, ndim,
-                 log_likelihood, log_prior, Tmax=1e3):
+                 log_likelihood, log_prior, Tmax=1e3, pool=None):
         self.n_temps   = n_temps
         self.n_walkers  = n_walkers
         self.ndim       = ndim
@@ -167,25 +207,16 @@ class PTSampler:
         # one emcee sampler per temperature
         self._samplers = []
         for t in range(n_temps):
-            beta = self.betas[t]
-
-            def _make_tp(b):
-                def tp(theta):
-                    lp = self._log_prior(theta)
-                    if not np.isfinite(lp):
-                        return -np.inf
-                    ll = self._log_like(theta)
-                    return lp + b * ll
-                return tp
-
             moves = [emcee.moves.DEMove()]
             try:
                 moves.append(emcee.moves.DESnookerMove())
             except AttributeError:
                 pass
 
-            s = emcee.EnsembleSampler(n_walkers, ndim, _make_tp(beta),
-                                      moves=moves)
+            s = emcee.EnsembleSampler(
+                n_walkers, ndim,
+                _TemperedProb(self._log_like, self._log_prior, self.betas[t]),
+                moves=moves, pool=pool)
             self._samplers.append(s)
 
         # swap bookkeeping
@@ -292,20 +323,18 @@ class PTSampler:
 # emcee-only sampler
 # ==================================================================
 
-def run_emcee_sampler(n_walkers, n_steps, log_likelihood, log_prior, p0):
+def run_emcee_sampler(n_walkers, n_steps, log_likelihood, log_prior, p0,
+                      pool=None):
     moves = [emcee.moves.DEMove()]
     try:
         moves.append(emcee.moves.DESnookerMove())
     except AttributeError:
         pass
 
-    def log_prob(theta):
-        lp = log_prior(theta)
-        if not np.isfinite(lp):
-            return -np.inf
-        return lp + log_likelihood(theta)
+    log_prob = _TemperedProb(log_likelihood, log_prior)
 
-    sampler = emcee.EnsembleSampler(n_walkers, NDIM, log_prob, moves=moves)
+    sampler = emcee.EnsembleSampler(n_walkers, NDIM, log_prob,
+                                    moves=moves, pool=pool)
 
     t0 = time.time()
     sampler.run_mcmc(p0, n_steps, progress=True)
@@ -318,11 +347,12 @@ def run_emcee_sampler(n_walkers, n_steps, log_likelihood, log_prior, p0):
 # ==================================================================
 
 def run_dynesty_sampler(log_likelihood, prior_transform_fn,
-                        nlive=500, dlogz=0.5):
+                        nlive=500, dlogz=0.5, pool=None):
     sampler = dynesty.DynamicNestedSampler(
         log_likelihood, prior_transform_fn, ndim=NDIM,
         bound="multi",      # multi-ellipsoid  -> tracks multiple modes
         sample="rwalk",
+        pool=pool,
     )
     sampler.run_nested(nlive_init=nlive, dlogz_init=dlogz,
                        print_progress=True)
@@ -496,9 +526,18 @@ def main():
     ap.add_argument("--verbose", action="store_true",
                     help="Show HelProp command and stderr output")
 
+    # parallelism
+    ap.add_argument("--nproc", type=int, default=1,
+                    help="Number of parallel worker processes "
+                         "(1 = serial, 0 = use all CPU cores)")
+
     # observed data
     ap.add_argument("--rel-err",    type=float, default=0.05,
                     help="Relative error when obs file has only (E,F) columns")
+
+    # reproducibility
+    ap.add_argument("--seed", type=int, default=42,
+                    help="Random seed for reproducibility")
 
     # prior ranges
     ap.add_argument("--D0-range", type=float, nargs=2,
@@ -511,6 +550,10 @@ def main():
     # update global prior bounds
     D0_RANGE = tuple(args.D0_range)
     M_RANGE  = tuple(args.m_range)
+
+    # build prior functions as closures (carries correct ranges into workers)
+    log_prior = make_log_prior(D0_RANGE, M_RANGE)
+    prior_transform = make_prior_transform(D0_RANGE, M_RANGE)
 
     # dependency checks
     if args.sampler in ("pt", "emcee") and not HAS_EMCEE:
@@ -552,63 +595,81 @@ def main():
                            use_cache=not args.no_cache)
     log_likelihood = make_log_likelihood(runner, E_obs, F_obs, err_obs)
 
-    np.random.seed(args.seed if args.seed else 42)
+    np.random.seed(args.seed)
     os.makedirs(args.outdir, exist_ok=True)
+
+    # ---------- worker pool ----------
+    nproc = args.nproc if args.nproc > 0 else cpu_count()
+    pool = Pool(nproc) if nproc > 1 else None
+    if pool is not None:
+        print(f"  Parallel pool: {nproc} worker processes "
+              f"(out of {cpu_count()} CPU cores)")
 
     # ---------- run sampler ----------
     print(f"\n{'=' * 50}")
     print(f"  Sampler : {args.sampler.upper()}")
     print(f"  Walkers : {args.nwalkers}    Steps : {args.nsteps}    "
-          f"Burn-in : {args.nburn}")
+          f"Burn-in : {args.nburn}"
+          f"{'    Workers : ' + str(nproc) if pool else ''}")
     print(f"{'=' * 50}\n")
 
-    if args.sampler == "pt":
-        p0 = np.zeros((args.ntemps, args.nwalkers, NDIM))
-        for t in range(args.ntemps):
-            p0[t, :, 0] = np.random.uniform(*D0_RANGE, size=args.nwalkers)
-            p0[t, :, 1] = np.random.uniform(*M_RANGE,  size=args.nwalkers)
+    try:
+        if args.sampler == "pt":
+            p0 = np.zeros((args.ntemps, args.nwalkers, NDIM))
+            for t in range(args.ntemps):
+                p0[t, :, 0] = np.random.uniform(*D0_RANGE, size=args.nwalkers)
+                p0[t, :, 1] = np.random.uniform(*M_RANGE,  size=args.nwalkers)
 
-        sampler = PTSampler(args.ntemps, args.nwalkers, NDIM,
-                            log_likelihood, log_prior, Tmax=args.Tmax)
-        sampler.crun_mcm(p0, args.nsteps,
-                         swap_interval=args.swap_interval, progress=True)
+            sampler = PTSampler(args.ntemps, args.nwalkers, NDIM,
+                                log_likelihood, log_prior, Tmax=args.Tmax,
+                                pool=pool)
+            sampler.run_mcmc(p0, args.nsteps,
+                             swap_interval=args.swap_interval, progress=True)
 
-        samples = sampler.get_chain(flat=True, discard=args.nburn)
+            samples = sampler.get_chain(flat=True, discard=args.nburn)
 
-        print("\nSwap acceptance rates:")
-        for t, r in enumerate(sampler.swap_acceptance_rates):
-            print(f"  T{t} <-> T{t+1} : {r:.3f}")
+            print("\nSwap acceptance rates:")
+            for t, r in enumerate(sampler.swap_acceptance_rates):
+                print(f"  T{t} <-> T{t+1} : {r:.3f}")
 
-    elif args.sampler == "emcee":
-        p0 = np.zeros((args.nwalkers, NDIM))
-        p0[:, 0] = np.random.uniform(*D0_RANGE, size=args.nwalkers)
-        p0[:, 1] = np.random.uniform(*M_RANGE,  size=args.nwalkers)
+        elif args.sampler == "emcee":
+            p0 = np.zeros((args.nwalkers, NDIM))
+            p0[:, 0] = np.random.uniform(*D0_RANGE, size=args.nwalkers)
+            p0[:, 1] = np.random.uniform(*M_RANGE,  size=args.nwalkers)
 
-        sampler = run_emcee_sampler(args.nwalkers, args.nsteps,
-                                    log_likelihood, log_prior, p0)
-        samples = sampler.get_chain(flat=True, discard=args.nburn)
+            sampler = run_emcee_sampler(args.nwalkers, args.nsteps,
+                                        log_likelihood, log_prior, p0,
+                                        pool=pool)
+            samples = sampler.get_chain(flat=True, discard=args.nburn)
 
-        try:
-            tau = sampler.get_autocorr_time(quiet=True)
-            print(f"  Autocorrelation times: D0={tau[0]:.1f}  "
-                  f"m_corot={tau[1]:.1f}")
-        except Exception:
-            pass
+            try:
+                tau = sampler.get_autocorr_time(quiet=True)
+                print(f"  Autocorrelation times: D0={tau[0]:.1f}  "
+                      f"m_corot={tau[1]:.1f}")
+            except Exception:
+                pass
 
-    elif args.sampler == "dynesty":
-        sampler = run_dynesty_sampler(log_likelihood, prior_transform)
-        from dynesty import utils as dyfunc
-        weights = np.exp(sampler.results.logwt - sampler.results.logz[-1])
-        samples = dyfunc.resample_equal(sampler.results.samples, weights)
+        elif args.sampler == "dynesty":
+            sampler = run_dynesty_sampler(log_likelihood, prior_transform,
+                                          pool=pool)
+            from dynesty import utils as dyfunc
+            weights = np.exp(sampler.results.logwt - sampler.results.logz[-1])
+            samples = dyfunc.resample_equal(sampler.results.samples, weights)
 
-    # ---------- results ----------
-    rstats = runner.stats()
-    print(f"\nRunner stats:  calls={rstats['total_calls']}  "
-          f"cache_hits={rstats['cache_hits']}  "
-          f"hit_rate={rstats['hit_rate']:.2%}")
+        # ---------- results ----------
+        rstats = runner.stats()
+        print(f"\nRunner stats:  calls={rstats['total_calls']}  "
+              f"cache_hits={rstats['cache_hits']}  "
+              f"hit_rate={rstats['hit_rate']:.2%}")
 
-    print(f"\nAnalyzing {len(samples)} posterior samples ...")
-    analyze_results(samples, args.outdir, sampler_name=args.sampler)
+        print(f"\nAnalyzing {len(samples)} posterior samples ...")
+        analyze_results(samples, args.outdir, sampler_name=args.sampler)
+
+    finally:
+        # clean up worker pool (even on exception)
+        if pool is not None:
+            pool.close()
+            pool.join()
 
     print(f"\nAll output written to  {os.path.abspath(args.outdir)}/")
 

@@ -47,7 +47,7 @@ class HelPropRunner:
 
         self._call_count += 1
         out_spec = os.path.join(self._work_dir,
-                                f"out_{self._call_count}.dat")
+                                f"out_{os.getpid()}_{self._call_count}.dat")
 
         cmd = [self.helprop_bin]
         cmd.extend(self.common_opts)
