@@ -43,7 +43,7 @@ void IO::set_params(const std::map<std::string, docopt::value>& args) {
     return atof(args.at(key).asString().c_str());
   };
 
-  for (auto& k : { "number", "A", "Z", "B0", "polarity", "angle", "D0", "R0", "indexA", "indexB", "m" })
+  for (auto& k : { "number", "A", "Z", "B0", "polarity", "angle", "hcs-osc-amp", "hcs-osc-phase", "D0", "R0", "indexA", "indexB", "m" })
     params[k] = fargs(string("--") + k);
 }
 

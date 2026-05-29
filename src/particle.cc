@@ -21,7 +21,7 @@ particle::particle() :
   polarity(-1), B0(5 * nT), indexA(2), indexB(1), D0(5 * 1e22 * cm * cm / sec), rigidity0(1 * GeV / e), rk(3 * GeV / e / rigidity0),
   A_drift(1), m_corot(0),
   Bn(B0 * AU * AU / 1.35883),
-  r(AU), theta(90*deg + 1e-10), phi(1e-10), hcs(Wind(), "")
+  r(AU), theta(90*deg + 1e-10), phi(1e-10), hcs(Wind(r, theta, phi, HCS::angle), "")
   {}
 
 particle::particle(const map<string, docopt::value>& args) :
@@ -29,7 +29,7 @@ particle::particle(const map<string, docopt::value>& args) :
   polarity(args.at("--polarity").asLong()), B0(stod(args.at("--B0").asString()) * nT), indexA(stod(args.at("--indexA").asString())), indexB(stod(args.at("--indexB").asString())), D0(stod(args.at("--D0").asString()) * 1e22 * cm * cm / sec), rigidity0(stod(args.at("--R0").asString()) * GeV / e), rk(3 * GeV / e / rigidity0),
   A_drift(1), m_corot(stod(args.at("--m").asString())),
   Bn(B0 * AU * AU / 1.35883),
-  r(AU), theta(90*deg + 1e-6), phi(1e-10), hcs(Wind(), args.at("--hcs-table").asString())
+  r(AU), theta(90*deg + 1e-6), phi(1e-10), hcs(Wind(r, theta, phi, HCS::angle), args.at("--hcs-table").asString())
 {}
 
 particle::~particle() {}
@@ -243,7 +243,7 @@ void particle::step(const string& logname, int max_step) {
         Vns = (0.457 - 0.412 * d_HCS / Rg + 0.0915 * d_HCS * d_HCS / Rg / Rg) * V_p * polarity * (Z > 0 ? 1 : -1) * A_drift;//
   
       double Vrx = r * sin(theta_s) * HCS::Omega;
-      double Vtx = - tan(HCS::angle) * sin(theta_s) * cos(hcs.phi0(r, phi)) * (hcs.Vs_eq * hcs.Vs_eq + Vrx * Vrx) / hcs.Vs_eq;
+      double Vtx = - tan(hcs.angle_eff()) * sin(theta_s) * cos(hcs.phi0(r, phi)) * (hcs.Vs_eq * hcs.Vs_eq + Vrx * Vrx) / hcs.Vs_eq;
       double Vpx = hcs.Vs_eq;
       double Vtot = sqrt(Vrx * Vrx + Vtx * Vtx + Vpx * Vpx);
   

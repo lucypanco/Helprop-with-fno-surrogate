@@ -18,6 +18,8 @@ using namespace std;
 using namespace Unit;
 
 double HCS::angle = 45 * Unit::deg;
+double HCS::angle_osc_amp = 0;
+double HCS::angle_osc_phase = 0;
 HCS::HCSFORM HCS::hcsform = Jokipii_Thomas;
 const double HCS::Omega = 2*Unit::pi/27.5/Unit::day;
 std::vector<double> HCS::angle_axis;
@@ -172,13 +174,26 @@ void HCS::r_bound(double r, double phi, double phi0, double& rlow, double& rup) 
   rup = rlow + Tr;
 }
 
+double HCS::angle_eff() const {
+  if (angle_osc_amp == 0) return angle;
+  return angle + angle_osc_amp * sin(angle_osc_phase);
+}
+
 double HCS::Theta_S_Jokipii_Thomas(double phi0) {
+  return Theta_S_Jokipii_Thomas_at_angle(phi0, angle);
+}
+
+double HCS::Theta_S_Jokipii_Thomas_at_angle(double phi0, double angle) {
   return pi / 2 - asin(sin(angle) * sin(phi0));
 //  static fcache theta_jokipii_thomas([](double x) { return pi / 2 - asin(sin(angle) * sin(x)); }, 1000000);
 //
 //  return theta_jokipii_thomas(phi0);
 }
 double HCS::Phi0_S_Jokipii_Thomas(double theta) {
+  return Phi0_S_Jokipii_Thomas_at_angle(theta, angle);
+}
+
+double HCS::Phi0_S_Jokipii_Thomas_at_angle(double theta, double angle) {
   double ratio = sin(pi / 2 - theta) / sin(angle);
   if (ratio >= 1) return pi / 2;
   else if (ratio <= -1) return -pi / 2;
@@ -187,12 +202,20 @@ double HCS::Phi0_S_Jokipii_Thomas(double theta) {
 }
 
 double HCS::Theta_S_Kota_Jokipii(double phi0) {
+  return Theta_S_Kota_Jokipii_at_angle(phi0, angle);
+}
+
+double HCS::Theta_S_Kota_Jokipii_at_angle(double phi0, double angle) {
   return pi / 2 - atan(tan(angle) * sin(phi0));
 //  static fcache theta_kota_jokipii([](double x) { return pi / 2 - atan(tan(angle) * sin(x)); }, 1000000);
 //
 //  return theta_kota_jokipii(phi0);
 }
 double HCS::Phi0_S_Kota_Jokipii(double theta) {
+  return Phi0_S_Kota_Jokipii_at_angle(theta, angle);
+}
+
+double HCS::Phi0_S_Kota_Jokipii_at_angle(double theta, double angle) {
   double ratio = tan(pi / 2 - theta) / tan(angle);
   if (ratio >= 1) return pi / 2;
   else if (ratio <= -1) return -pi / 2;
@@ -201,14 +224,16 @@ double HCS::Phi0_S_Kota_Jokipii(double theta) {
 }
 
 double HCS::Theta_S(double r, double phi) const {
+  double angle = angle_eff();
   if (hcsform == Jokipii_Thomas)
-    return Theta_S_Jokipii_Thomas(r, phi);
+    return Theta_S_Jokipii_Thomas_at_angle(phi0(r, phi), angle);
   else if (hcsform == Kota_Jokipii)
-    return Theta_S_Kota_Jokipii(r, phi);
+    return Theta_S_Kota_Jokipii_at_angle(phi0(r, phi), angle);
 
   assert(false && "hcsform not supported");
   return 0;
 }
+
 extern "C" double Theta_S_C(double r, double phi) {
   return HCS(430 * km / sec, "").Theta_S(r * AU, phi);
 }
@@ -217,6 +242,17 @@ double HCS::Phi0_S(double theta) {
     return Phi0_S_Jokipii_Thomas(theta);
   else if (hcsform == Kota_Jokipii)
     return Phi0_S_Kota_Jokipii(theta);
+
+  assert(false && "hcsform not supported");
+  return 0;
+}
+
+double HCS::Phi0_S_eff(double theta) const {
+  double angle = angle_eff();
+  if (hcsform == Jokipii_Thomas)
+    return Phi0_S_Jokipii_Thomas_at_angle(theta, angle);
+  else if (hcsform == Kota_Jokipii)
+    return Phi0_S_Kota_Jokipii_at_angle(theta, angle);
 
   assert(false && "hcsform not supported");
   return 0;
@@ -340,6 +376,7 @@ class WaveVdot {
   }
 
   Vec tangent_vec(double r, const Vec& point) const {
+    const double angle = h->angle_eff();
     double ctheta = point.z / r, stheta = sqrt(1 - ctheta * ctheta);
     double rphi = stheta * r;
 
@@ -364,8 +401,8 @@ class WaveVdot {
     double phi0 = phi_cs + fabs(r * ov);
 
     Vec dv;
-    if (HCS::hcsform == HCS::Jokipii_Thomas) dv = - sin(HCS::angle) * cos(phi0) / stheta * ov * dtheta + dr;
-    else if (HCS::hcsform == HCS::Kota_Jokipii) dv = - tan(HCS::angle) * cos(phi0) * stheta * stheta * ov * dtheta + dr;
+    if (HCS::hcsform == HCS::Jokipii_Thomas) dv = - sin(angle) * cos(phi0) / stheta * ov * dtheta + dr;
+    else if (HCS::hcsform == HCS::Kota_Jokipii) dv = - tan(angle) * cos(phi0) * stheta * stheta * ov * dtheta + dr;
     else assert(false && "Unsuported hcsform");
 
     dv.normalize();
@@ -456,6 +493,7 @@ bool HCS::wave_iterate(const Vec& target_point, Vec& p_cs, double& diter) const 
 }
 
 Vec HCS::norm_vec(const Vec& p_cs) const {
+  const double angle = angle_eff();
   double r_cs = p_cs.len();
   double phi_cs = p_cs.phi();
 
@@ -692,6 +730,7 @@ inline void show_log(const string& title, const Vec& target, double diter, doubl
 }
 
 double HCS::get_distance_from_point(const Vec& target, Vec& point) const {
+  const double angle = angle_eff();
   double diter = 1e5 * AU,
          diter_last = 1e5 * AU;
 
@@ -719,7 +758,8 @@ double HCS::get_distance_from_point(const Vec& target, Vec& point) const {
 
 std::mutex mtx;
 double HCS::get_distance_intp(double r, double theta, double phi) {
-  int i = upper_bound(angle_axis.begin(), angle_axis.end(), HCS::angle) - angle_axis.begin() - 1;
+  const double angle = angle_eff();
+  int i = upper_bound(angle_axis.begin(), angle_axis.end(), angle) - angle_axis.begin() - 1;
   assert(0 <= i && i < angle_axis.size() - 2 && "The HCS::angle should be in the range of angle_axis.");
 
   mtx.lock();
@@ -727,7 +767,7 @@ double HCS::get_distance_intp(double r, double theta, double phi) {
     tables[i] = new KDInterp(table_names[i]);
   mtx.unlock();
 
-  return hcs_interp_eval(HCS::angle, r, theta, phi, tables[i], *this);
+  return hcs_interp_eval(angle, r, theta, phi, tables[i], *this);
 }
 
 double HCS::get_distance(double r, double theta, double phi) {
@@ -738,11 +778,12 @@ double HCS::get_distance(double r, double theta, double phi) {
 }
 
 double HCS::get_distance(double r, double theta, double phi, Vec& p_cs) const {
+  const double angle = angle_eff();
   Vec target;
   target.set_spherical(r, theta, phi);
 
   double rlow, rup;
-  double phi0 = Phi0_S(theta);
+  double phi0 = Phi0_S_eff(theta);
   r_bound(r, phi, phi0, rlow, rup);
   if (rlow < 0) rlow = 1e-2*AU; // Avoid negative radius
 
@@ -789,6 +830,7 @@ double HCS::get_distance(double r, double theta, double phi, Vec& p_cs) const {
 }
 
 double HCS::get_raw_distance(double r, double theta) const {
+  const double angle = angle_eff();
   if (fabs(pi / 2 - theta) < angle) return 0;
 
   double dangle = theta < pi / 2 ? pi / 2 - angle - theta : theta - pi / 2 - angle;

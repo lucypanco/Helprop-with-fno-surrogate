@@ -25,6 +25,8 @@ This Routine is used to Check the simulation of one particle.
       -B B0, --B0 B0                    The magnetic strength around the Earth in nT [default: 5].
       -p POLARITY, --polarity POLARITY  The direction polarity of the magnetic field [default: -1].
       -a ANGLE, --angle ANGLE           Tilt angle of HCS in deg [default: 15].
+      --hcs-osc-amp AMP                 HCS tilt perturbation amplitude in deg [default: 0].
+      --hcs-osc-phase PHASE             HCS tilt perturbation phase in deg [default: 0].
       -D D0, --D0 D0                    Reference diffusion coefficient in unit 1e22 cm^2/s [default: 5].
       -R R0, --R0 R0                    Reference rigidity for the diffusion coefficient in unit GV [default: 1].
       --max-step MSTEP                  The maximum allowed steps [default: -1].
@@ -39,6 +41,8 @@ int main(int argc, char* argv[]) {
   auto fargs = [&](const string& k) { return atof(args.at(k).asString().c_str()); };
 
   HCS::angle = stod(args.at("--angle").asString()) * Unit::deg;
+  HCS::angle_osc_amp = stod(args.at("--hcs-osc-amp").asString()) * Unit::deg;
+  HCS::angle_osc_phase = stod(args.at("--hcs-osc-phase").asString()) * Unit::deg;
   HCS::hcsform = HCS::Kota_Jokipii;
 
   particle one(args);

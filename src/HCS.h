@@ -21,7 +21,9 @@ class HCS {
     enum HCSFORM { Jokipii_Thomas, Kota_Jokipii };
     static HCSFORM hcsform;
     static const double Omega;                        //angular velocity corresponding to 27.5 day
-    static double angle;                        //tilt angle of HCS
+    static double angle;                        //baseline tilt angle of HCS
+    static double angle_osc_amp;                //tilt perturbation amplitude
+    static double angle_osc_phase;              //tilt perturbation phase
     double t0 = 0.0;
     double t = 0.0;
     double Vs_eq;
@@ -40,7 +42,8 @@ class HCS {
 
     double get_raw_distance(double r, double theta) const;
 
-    double Theta_S(double, double) const;                                     //theat_s function
+    double angle_eff() const;
+    double Theta_S(double, double) const;                                     //effective HCS theta
     static double Phi0_S(double);
 
     int sign(double r, double theta, double phi) const {
@@ -65,17 +68,16 @@ private:
     bool point_iterate(const Vec& target_point, Vec& p_cs, Vec& dh, double& diter) const;
 
     static double Phi0_S_Jokipii_Thomas(double);
+    static double Phi0_S_Jokipii_Thomas_at_angle(double theta, double angle);
     static double Phi0_S_Kota_Jokipii(double);
+    static double Phi0_S_Kota_Jokipii_at_angle(double theta, double angle);
 
     static double Theta_S_Jokipii_Thomas(double);
+    static double Theta_S_Jokipii_Thomas_at_angle(double phi0, double angle);
     static double Theta_S_Kota_Jokipii(double);
+    static double Theta_S_Kota_Jokipii_at_angle(double phi0, double angle);
 
-    inline double Theta_S_Jokipii_Thomas(double r, double phi) const {
-      return Theta_S_Jokipii_Thomas(phi0(r, phi));
-    }
-    inline double Theta_S_Kota_Jokipii(double r, double phi) const {
-      return Theta_S_Kota_Jokipii(phi0(r, phi));
-    }
+    double Phi0_S_eff(double theta) const;
 };
 
 std::string doubleToBinaryString(double value);
