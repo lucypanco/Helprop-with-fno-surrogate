@@ -48,6 +48,7 @@ from multiprocessing import Pool, cpu_count
 
 from interp import LogInterp
 from helprop_runner import HelPropRunner
+from surrogate_runner import SurrogateRunner
 
 # ---------- optional deps ----------
 try:
@@ -176,6 +177,65 @@ def make_prior_transform(D0_range, M_range):
 
 def make_log_likelihood(runner, E_obs, F_obs, err_obs):
     return _LogLikelihood(runner, E_obs, F_obs, err_obs)
+
+
+def _parse_fixed_option_items(items):
+    parsed = {}
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"expected name=value, got {item!r}")
+        name, value = item.split("=", 1)
+        parsed[name] = float(value)
+    return parsed
+
+
+def _warm_start(log_prob, n_walkers, D0_range, M_range, oversample=20):
+    """Find n_walkers valid starting positions with finite log-probability.
+
+    Generates candidates in random batches and keeps only those where
+    the log-probability is finite.  Once enough valid points are found,
+    the remaining slots are filled with small perturbations around the
+    valid ones (so all walkers start in a good region).
+    """
+    valid = []
+    for _ in range(100):  # at most 100 batches
+        n_try = max(n_walkers * oversample - len(valid), 64)
+        candidates = np.column_stack([
+            np.random.uniform(*D0_range, size=n_try),
+            np.random.uniform(*M_range,  size=n_try),
+        ])
+        for c in candidates:
+            lp = log_prob(c)
+            if np.isfinite(lp):
+                valid.append(c.copy())
+                if len(valid) >= n_walkers:
+                    break
+        if len(valid) >= n_walkers:
+            break
+
+    if not valid:
+        sys.exit("ERROR: could not find any starting point with finite "
+                 "log-probability.  Check that HelProp works for the "
+                 "given D0/m ranges.")
+
+    valid = np.array(valid)
+    if len(valid) < n_walkers:
+        # Fill remaining slots with small perturbations around valid points
+        print(f"  Warm-start: found {len(valid)} valid points, "
+              f"perturbing to fill {n_walkers - len(valid)} more")
+        while len(valid) < n_walkers:
+            idx = np.random.randint(len(valid))
+            perturbed = valid[idx] + 0.01 * np.array(
+                [D0_range[1] - D0_range[0], M_range[1] - M_range[0]
+                 ]) * np.random.randn(NDIM)
+            lp = log_prob(perturbed)
+            if np.isfinite(lp):
+                valid = np.vstack([valid, perturbed])
+
+    np.random.shuffle(valid)
+    print(f"  Warm-start: {min(len(valid), n_walkers)}/{n_walkers} "
+          f"walkers initialized at finite-log-prob positions")
+    return valid[:n_walkers]
 
 
 # ==================================================================
@@ -525,6 +585,13 @@ def main():
                     help="Disable HelProp result caching in the runner")
     ap.add_argument("--verbose", action="store_true",
                     help="Show HelProp command and stderr output")
+    ap.add_argument("--backend", choices=["helprop", "surrogate"],
+                    default="helprop",
+                    help="Forward model backend for likelihood calls")
+    ap.add_argument("--surrogate-model", default="",
+                    help="Saved helprop_surrogate model for --backend surrogate")
+    ap.add_argument("--surrogate-param", action="append", default=[],
+                    help="Extra learned surrogate parameter as name=value")
 
     # parallelism
     ap.add_argument("--nproc", type=int, default=1,
@@ -577,22 +644,36 @@ def main():
     print(f"  {len(E_obs)} data points, "
           f"E in [{E_obs.min():.3f}, {E_obs.max():.3f}] GeV")
 
-    # set up runner — fixed physics + simulation options
-    common_opts = [
-        f"--A={args.A}", f"--Z={args.Z}",
-        f"--B0={args.B0}", f"--polarity={args.polarity}",
-        f"--angle={args.angle}", f"--R0={args.R0}",
-        f"--indexA={args.indexA}", f"--indexB={args.indexB}",
-        f"--number={args.nparticles}",
-        f"--nthread={args.nthread}",
-        f"--iotype=TXT",
-    ]
-    if args.hcs_table:
-        common_opts.append(f"--hcs-table={args.hcs_table}")
-    common_opts.extend(args.extra_opts)
-    runner = HelPropRunner(args.helprop, args.lis, common_opts,
-                           verbose=args.verbose, timeout=600,
-                           use_cache=not args.no_cache)
+    if args.backend == "surrogate":
+        if not args.surrogate_model:
+            sys.exit("ERROR: --surrogate-model is required with --backend surrogate")
+        surrogate_options = {
+            "B0": args.B0,
+            "angle": args.angle,
+            "indexA": args.indexA,
+            "indexB": args.indexB,
+        }
+        surrogate_options.update(_parse_fixed_option_items(args.surrogate_param))
+        runner = SurrogateRunner(args.surrogate_model, args.lis,
+                                 fixed_options=surrogate_options,
+                                 verbose=args.verbose)
+    else:
+        # set up runner — fixed physics + simulation options
+        common_opts = [
+            f"--A={args.A}", f"--Z={args.Z}",
+            f"--B0={args.B0}", f"--polarity={args.polarity}",
+            f"--angle={args.angle}", f"--R0={args.R0}",
+            f"--indexA={args.indexA}", f"--indexB={args.indexB}",
+            f"--number={args.nparticles}",
+            f"--nthread={args.nthread}",
+            f"--iotype=TXT",
+        ]
+        if args.hcs_table:
+            common_opts.append(f"--hcs-table={args.hcs_table}")
+        common_opts.extend(args.extra_opts)
+        runner = HelPropRunner(args.helprop, args.lis, common_opts,
+                               verbose=args.verbose, timeout=600,
+                               use_cache=not args.no_cache)
     log_likelihood = make_log_likelihood(runner, E_obs, F_obs, err_obs)
 
     np.random.seed(args.seed)
@@ -614,11 +695,15 @@ def main():
     print(f"{'=' * 50}\n")
 
     try:
+        # build a combined log_prob for warm-start screening
+        _warm_prob = _TemperedProb(log_likelihood, log_prior, beta=1.0)
+
         if args.sampler == "pt":
             p0 = np.zeros((args.ntemps, args.nwalkers, NDIM))
+            # warm-start each temperature independently
             for t in range(args.ntemps):
-                p0[t, :, 0] = np.random.uniform(*D0_RANGE, size=args.nwalkers)
-                p0[t, :, 1] = np.random.uniform(*M_RANGE,  size=args.nwalkers)
+                p0[t] = _warm_start(_warm_prob, args.nwalkers,
+                                    D0_RANGE, M_RANGE)
 
             sampler = PTSampler(args.ntemps, args.nwalkers, NDIM,
                                 log_likelihood, log_prior, Tmax=args.Tmax,
@@ -633,9 +718,8 @@ def main():
                 print(f"  T{t} <-> T{t+1} : {r:.3f}")
 
         elif args.sampler == "emcee":
-            p0 = np.zeros((args.nwalkers, NDIM))
-            p0[:, 0] = np.random.uniform(*D0_RANGE, size=args.nwalkers)
-            p0[:, 1] = np.random.uniform(*M_RANGE,  size=args.nwalkers)
+            p0 = _warm_start(_warm_prob, args.nwalkers,
+                             D0_RANGE, M_RANGE)
 
             sampler = run_emcee_sampler(args.nwalkers, args.nsteps,
                                         log_likelihood, log_prior, p0,
