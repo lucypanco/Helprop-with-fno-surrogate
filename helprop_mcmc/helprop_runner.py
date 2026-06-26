@@ -36,8 +36,11 @@ class HelPropRunner:
             self._work_dir = work_dir
             os.makedirs(work_dir, exist_ok=True)
 
-    def run(self, D0, m_corot):
+    def run(self, D0, m_corot=None):
         """Run HelProp with (D0, m_corot). Returns LogInterp or None on failure."""
+        if isinstance(D0, dict):
+            m_corot = D0["m"]
+            D0 = D0["D0"]
         key = (round(D0, 8), round(m_corot, 8))
         if self.use_cache and key in self._cache:
             self._cache_hits += 1

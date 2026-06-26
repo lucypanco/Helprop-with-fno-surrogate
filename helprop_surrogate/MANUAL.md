@@ -39,20 +39,31 @@ Use the backend-neutral data generator:
 python -m helprop_surrogate.matrix_data \
   --helprop ./HelProp \
   --runs-root surrogate_runs \
-  --n-runs 200 \
-  --learn D0 m \
-  --range D0:0.1:50 \
-  --range m:-2:2 \
+  --n-runs 1000 \
+  --learn D0 m indexA indexB angle hcs-osc-amp hcs-osc-phase \
+  --range D0:0.1:15 \
+  --range m:-3.5:3.5 \
+  --range indexA:0:3.0 \
+  --range indexB:0:3.0 \
+  --range angle:5:40 \
+  --range hcs-osc-amp:0:10 \
+  --range hcs-osc-phase:0:360 \
   --fixed A=1 \
   --fixed Z=1 \
   --fixed polarity=-1 \
   --fixed R0=1 \
-  --etoa 0.1,100,30 \
-  --elis 0.1,100,30 \
-  --number 200 \
-  --nthread 4 \
-  --jobs 2
+  --etoa 0.001,1e7,90\
+  --elis 0.001,1e8,120\
+  --number 400\
+  --nthread 8 \
+  --jobs 3
 ```
+
+For FNO training, use grids wider than the final comparison range.  The model is
+least reliable at the outer grid boundary, so if the physics comparison needs
+`1e-3` to `1e6 GeV`, train `ETOA` out to about `1e7 GeV` and then write or cut
+the final prediction back to `1e6 GeV`.  Keep `ELIS` wider than `ETOA` because
+the transfer matrix columns represent the LIS energies used in the fold.
 
 Parallelism:
 
@@ -91,6 +102,51 @@ For discrete learned parameters, use choices:
 Prefer fixing `A`, `Z`, and `polarity` unless you truly need the surrogate to
 learn across particle species or polarities.
 
+For an electron-only surrogate, keep `A` and `Z` fixed and learn only the
+transport/solar parameters:
+
+```bash
+python -m helprop_surrogate.matrix_data \
+  --helprop ./HelProp \
+  --runs-root surrogate_runs \
+  --n-runs 500 \
+  --learn D0 m indexA indexB angle hcs-osc-amp hcs-osc-phase \
+  --range D0:0.1:50 \
+  --range m:-2:2 \
+  --range indexA:0.5:2.0 \
+  --range indexB:0.5:2.0 \
+  --range angle:5:30 \
+  --range hcs-osc-amp:0:10 \
+  --range hcs-osc-phase:0:360 \
+  --fixed A=0 \
+  --fixed Z=-1 \
+  --fixed polarity=-1 \
+  --fixed R0=1 \
+  --etoa 0.001,1e7,300 \
+  --elis 0.001,1e8,450 \
+  --number 200 \
+  --nthread 4 \
+  --jobs 2
+```
+
+For a positron-only surrogate, use the same command with `--fixed Z=1`.
+
+If you intentionally learn over integer nuclear species, mark `A` and `Z` as
+integer parameters so HelProp receives integer command-line values:
+
+```bash
+--learn D0 m A Z
+--range D0:0.1:50
+--range m:-2:2
+--range A:1:56
+--range Z:1:26
+--integer-param A
+--integer-param Z
+```
+
+`A` and `Z` are sampled independently in this generator.  This can create
+unphysical pairs, so separate fixed-species runs are usually safer.
+
 ## 3. Train FNO
 
 Train with the FNO backend:
@@ -99,11 +155,12 @@ Train with the FNO backend:
 python -m helprop_surrogate.fno.train \
   --dataset surrogate_runs/run_0001/data/matrices.npz \
   --epochs 300 \
-  --batch-size 16 \
-  --width 32 \
-  --layers 4 \
+  --batch-size 32 \
+  --width 64 \
+  --layers 6 \
   --modes 10 \
-  --device cuda
+  --device cuda \
+  --verbose-train
 ```
 
 Training outputs:
@@ -143,12 +200,23 @@ Fold a LIS spectrum:
 
 ```bash
 python -m helprop_surrogate.predict_kernel \
-  surrogate_runs/run_0001/kernel_fno.pkl \
+  fno_runs/run_0003/kernel_fno.pkl \
   --D0 5 \
   --m 0 \
+  --angle 15\
+  --indexA 1 \
+  --indexB 1 \
+  --hcs-osc-phase 0 \
+  --hcs-osc-amp 0 \
   --lis Proton_spectrum.txt \
-  --spectrum-out surrogate_runs/run_0001/spectrum_pred.txt
+  --spectrum-out fno_runs/run_0003/spectrum_pred.txt \
+  --spectrum-etoa 0.001,1e6,250
 ```
+
+During folded-spectrum prediction, the LIS file is interpolated onto the
+trained `ELIS` grid, the FNO folds on the trained `ETOA x ELIS` matrix grid,
+and `--spectrum-etoa` only controls the final saved TOA spectrum grid.  Keep
+`--spectrum-etoa` inside the trained `ETOA` range.
 
 Use in MCMC:
 
@@ -159,3 +227,60 @@ python helprop_mcmc/mcmc_analysis.py \
   --lis Proton_spectrum.txt \
   --obs ProtonModulated_ekin.txt
 ```
+
+Two surrogate call:
+```bash
+python helprop_mcmc/mcmc_analysis.py \
+    --backend surrogate \
+    --surrogate-low-model surrogate_runs/run_0002/kernel_fno.pkl \
+    --surrogate-high-model fno_runs/run_0003/kernel_fno.pkl \
+    --surrogate-split-energy 1.0 \
+    --surrogate-blend-dex 0.2 \
+    --lis ./Proton_spectrum.txt \
+    --obs ./ProtonModulated_ekin.txt \
+    --sampler dynesty \
+    --nwalkers 60 \
+    --nsteps 7000 \
+    --nburn 1200 \
+    --nproc 1 \
+    --A 1 --Z 1 --polarity -1 --R0 1 --B0 5 \
+    --outdir chains_dual_7d --sample-range m:-3:3 angle:5:35 hcs-osc-amp:-6:6
+
+```
+
+
+```bash
+python -m helprop_surrogate.rebuild_matrix_npz \
+    surrogate_runs/run_0003/data/*.bson \
+    surrogate_runs/run_0004/data/*.bson \
+    surrogate_runs/run_0005/data/*.bson \
+    --out surrogate_runs/merged_1000/data/matrices.npz \
+    --learn D0 m indexA indexB angle hcs-osc-amp hcs-osc-phase \
+    --seed 12345
+```
+python -m helprop_surrogate.fno.train \
+    --dataset surrogate_runs/merged_1003/data/matrices.npz \
+    --epochs 500 \
+    --batch-size 8 \
+    --width 64 \
+    --layers 6 \
+    --modes-etoa 12 \
+    --modes-elis 16 \
+    --projection-size 128 \
+    --dropout 0.03 \
+    --learning-rate 5e-4 \
+    --weight-decay 1e-4 \
+    --device cuda \
+    --fixed A=0 \
+    --fixed Z=-1 \
+    --fixed polarity=-1 \
+    --fixed R0=1 \
+    --range D0:0.1:50 \
+    --range m:-2:2 \
+    --range indexA:0.5:2.0 \
+    --range indexB:0.5:2.0 \
+    --range angle:5:30 \
+    --range hcs-osc-amp:0:10 \
+    --range hcs-osc-phase:0:360 \
+    --checkpoint-every 50 \
+    --verbose-train

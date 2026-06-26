@@ -4,9 +4,9 @@ import unittest
 
 import numpy as np
 
-from helprop_surrogate import ConditionalKernelSurrogate, TransitionDataset
-from helprop_surrogate.data import load_npz_transitions
-from helprop_surrogate.kernel import fold_lis
+from helprop_surrogate.data import TransitionDataset, load_npz_transitions
+from helprop_surrogate.kernel import ekin_to_momentum, fold_lis
+from helprop_surrogate.kernel import ConditionalKernelSurrogate
 
 
 def make_training_data(n=160):
@@ -51,6 +51,18 @@ class ConditionalKernelSurrogateTest(unittest.TestCase):
         expected = fold_lis(matrix, etoa_grid, elis_grid, lis_flux)
         actual = model.predict_spectrum(etoa_grid, elis_grid, lis_flux, theta)
         np.testing.assert_allclose(actual, expected)
+
+    def test_lepton_fold_uses_electron_mass_for_nonpositive_a(self):
+        energy = np.asarray([0.001, 0.01, 0.1])
+        m_electron = 5.10998e-4
+        expected_momentum = np.sqrt(energy * (energy + 2.0 * m_electron))
+
+        np.testing.assert_allclose(ekin_to_momentum(energy, A=0), expected_momentum)
+
+        matrix = np.eye(energy.size)
+        lis_flux = energy ** -2.0
+        spectrum = fold_lis(matrix, energy, energy, lis_flux, A=0)
+        np.testing.assert_allclose(spectrum, lis_flux)
 
     def test_transition_dataset_npz_roundtrip(self):
         etoa, elis, params = make_training_data(n=80)

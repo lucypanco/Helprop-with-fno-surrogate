@@ -16,7 +16,30 @@ Usage
   python mcmc_analysis.py --helprop ../HelProp --lis ../Proton_spectrum.txt --obs ../ProtonModulated_ekin.txt --sampler emcee --nwalkers 8 --nsteps 30 --nburn 10 --nproc 0
   python mcmc_analysis.py --sampler pt   --ntemps 10 --nwalkers 20 --nsteps 2000
   python mcmc_analysis.py --sampler emcee --nwalkers 32 --nsteps 5000
-  python mcmc_analysis.py --sampler dynesty
+ python helprop_mcmc/mcmc_analysis.py \
+    --backend surrogate \
+    --surrogate-low-model surrogate_runs/run_0002/kernel_fno.pkl \
+    --surrogate-high-model fno_runs/run_0003/kernel_fno.pkl \
+    --surrogate-split-energy 1.0 \
+    --surrogate-blend-dex 0.2 \
+    --lis ./Proton_spectrum.txt \
+    --obs ./ProtonModulated_ekin.txt \
+    --sampler dynesty \
+    --nproc 1 \
+    --A 1 --Z 1 --polarity -1 --R0 1 --B0 5 \
+    --hcs-osc-phase 0 \
+    --sample-param D0 \
+    --sample-param m \
+    --sample-param indexA \
+    --sample-param indexB \
+    --sample-param angle \
+    --sample-param hcs-osc-amp \
+    --sample-range m:-3:3 \
+    --sample-range angle:5:45 \
+    --sample-range hcs-osc-amp:0:10 \
+    --outdir chains_dual_6d_phase0 \
+    --verbose
+
 
 Argument Formats
 ----------------
@@ -48,7 +71,7 @@ from multiprocessing import Pool, cpu_count
 
 from interp import LogInterp
 from helprop_runner import HelPropRunner
-from surrogate_runner import SurrogateRunner
+from surrogate_runner import CompositeSurrogateRunner, SurrogateRunner
 
 # ---------- optional deps ----------
 try:
@@ -81,54 +104,87 @@ except ImportError:
 # Prior  (callable classes — picklable for multiprocessing)
 # ==================================================================
 
-D0_RANGE = (0.1, 50.0)
-M_RANGE  = (-2.0, 2.0)
-NDIM     = 2
-LABELS   = [r"$D_0\;(10^{22}\,\mathrm{cm^2/s})$", r"$m_{\mathrm{corot}}$"]
+DEFAULT_PARAM_RANGES = {
+    "D0": (0.1, 50.0),
+    "m": (-2.0, 2.0),
+    "indexA": (0.5, 2.0),
+    "indexB": (0.5, 2.0),
+    "angle": (5.0, 30.0),
+    "hcs-osc-amp": (0.0, 10.0),
+    "hcs-osc-phase": (0.0, 360.0),
+}
+DEFAULT_PARAM_LABELS = {
+    "D0": r"$D_0\;(10^{22}\,\mathrm{cm^2/s})$",
+    "m": r"$m_{\mathrm{corot}}$",
+    "indexA": r"$a$",
+    "indexB": r"$b$",
+    "angle": r"$\alpha_{\mathrm{HCS}}$",
+    "hcs-osc-amp": r"$\Delta\alpha_{\mathrm{HCS}}$",
+    "hcs-osc-phase": r"$\phi_{\mathrm{HCS}}$",
+}
+NDIM = 2
+LABELS = [DEFAULT_PARAM_LABELS["D0"], DEFAULT_PARAM_LABELS["m"]]
+PARAM_NAMES = ("D0", "m")
+PARAM_RANGES = {
+    "D0": DEFAULT_PARAM_RANGES["D0"],
+    "m": DEFAULT_PARAM_RANGES["m"],
+}
 
 
 class _LogPrior:
-    """Picklable uniform log-prior over (D0, m) ranges."""
-    def __init__(self, D0_range, M_range):
-        self.D0_range = D0_range
-        self.M_range = M_range
+    """Picklable uniform log-prior over named parameter ranges."""
+    def __init__(self, param_names, param_ranges):
+        self.param_names = tuple(param_names)
+        self.param_ranges = {name: tuple(param_ranges[name]) for name in self.param_names}
 
     def __call__(self, theta):
-        D0, m = theta
-        if (self.D0_range[0] <= D0 <= self.D0_range[1]
-                and self.M_range[0] <= m <= self.M_range[1]):
-            return 0.0
-        return -np.inf
+        values = np.asarray(theta, dtype=float)
+        if values.shape != (len(self.param_names),):
+            return -np.inf
+        if np.any(~np.isfinite(values)):
+            return -np.inf
+        for name, value in zip(self.param_names, values):
+            low, high = self.param_ranges[name]
+            if value < low or value > high:
+                return -np.inf
+        return 0.0
 
 
 class _PriorTransform:
-    """Picklable unit-cube -> (D0, m) transform for nested sampling."""
-    def __init__(self, D0_range, M_range):
-        self.D0_range = D0_range
-        self.M_range = M_range
+    """Picklable unit-cube -> named parameter transform for nested sampling."""
+    def __init__(self, param_names, param_ranges):
+        self.param_names = tuple(param_names)
+        self.param_ranges = {name: tuple(param_ranges[name]) for name in self.param_names}
 
     def __call__(self, u):
-        D0 = self.D0_range[0] + u[0] * (self.D0_range[1] - self.D0_range[0])
-        m  = self.M_range[0]  + u[1] * (self.M_range[1]  - self.M_range[0])
-        return np.array([D0, m])
+        values = []
+        for name, unit_value in zip(self.param_names, u):
+            low, high = self.param_ranges[name]
+            values.append(low + unit_value * (high - low))
+        return np.asarray(values, dtype=float)
 
 
 class _LogLikelihood:
     """Picklable log-likelihood with internal result cache."""
-    def __init__(self, runner, E_obs, F_obs, err_obs):
+    def __init__(self, runner, E_obs, F_obs, err_obs, param_names):
         self.runner = runner
         self.E_obs = E_obs
         self.F_obs = F_obs
         self.err_obs = err_obs
+        self.param_names = tuple(param_names)
         self._cache = {}
 
     def __call__(self, theta):
-        D0, m = theta
-        key = (round(D0, 8), round(m, 8))
+        theta = np.asarray(theta, dtype=float)
+        key = tuple(round(float(value), 8) for value in theta)
         if key in self._cache:
             return self._cache[key]
 
-        f_mod = self.runner.run(D0, m)
+        theta_options = {
+            name: float(value)
+            for name, value in zip(self.param_names, theta)
+        }
+        f_mod = self.runner.run(theta_options)
         if f_mod is None:
             self._cache[key] = -np.inf
             return -np.inf
@@ -167,16 +223,16 @@ class _TemperedProb:
         return lp + self._beta * self._ll(theta)
 
 
-def make_log_prior(D0_range, M_range):
-    return _LogPrior(D0_range, M_range)
+def make_log_prior(param_names, param_ranges):
+    return _LogPrior(param_names, param_ranges)
 
 
-def make_prior_transform(D0_range, M_range):
-    return _PriorTransform(D0_range, M_range)
+def make_prior_transform(param_names, param_ranges):
+    return _PriorTransform(param_names, param_ranges)
 
 
-def make_log_likelihood(runner, E_obs, F_obs, err_obs):
-    return _LogLikelihood(runner, E_obs, F_obs, err_obs)
+def make_log_likelihood(runner, E_obs, F_obs, err_obs, param_names):
+    return _LogLikelihood(runner, E_obs, F_obs, err_obs, param_names)
 
 
 def _parse_fixed_option_items(items):
@@ -189,7 +245,32 @@ def _parse_fixed_option_items(items):
     return parsed
 
 
-def _warm_start(log_prob, n_walkers, D0_range, M_range, oversample=20):
+def _parse_range_option_items(items):
+    parsed = {}
+    for item in items:
+        if ":" not in item:
+            raise ValueError(f"expected name:min:max, got {item!r}")
+        parts = item.split(":")
+        if len(parts) != 3:
+            raise ValueError(f"expected name:min:max, got {item!r}")
+        name, low, high = parts
+        low_value = float(low)
+        high_value = float(high)
+        if high_value <= low_value:
+            raise ValueError(f"range upper bound must exceed lower bound for {name}")
+        parsed[name] = (low_value, high_value)
+    return parsed
+
+
+def _default_ranges_for(param_names):
+    return {
+        name: DEFAULT_PARAM_RANGES[name]
+        for name in param_names
+        if name in DEFAULT_PARAM_RANGES
+    }
+
+
+def _warm_start(log_prob, n_walkers, param_names, param_ranges, oversample=20):
     """Find n_walkers valid starting positions with finite log-probability.
 
     Generates candidates in random batches and keeps only those where
@@ -198,12 +279,11 @@ def _warm_start(log_prob, n_walkers, D0_range, M_range, oversample=20):
     valid ones (so all walkers start in a good region).
     """
     valid = []
+    lows = np.asarray([param_ranges[name][0] for name in param_names], dtype=float)
+    highs = np.asarray([param_ranges[name][1] for name in param_names], dtype=float)
     for _ in range(100):  # at most 100 batches
         n_try = max(n_walkers * oversample - len(valid), 64)
-        candidates = np.column_stack([
-            np.random.uniform(*D0_range, size=n_try),
-            np.random.uniform(*M_range,  size=n_try),
-        ])
+        candidates = lows + np.random.random((n_try, len(param_names))) * (highs - lows)
         for c in candidates:
             lp = log_prob(c)
             if np.isfinite(lp):
@@ -216,7 +296,7 @@ def _warm_start(log_prob, n_walkers, D0_range, M_range, oversample=20):
     if not valid:
         sys.exit("ERROR: could not find any starting point with finite "
                  "log-probability.  Check that HelProp works for the "
-                 "given D0/m ranges.")
+                 "given parameter ranges.")
 
     valid = np.array(valid)
     if len(valid) < n_walkers:
@@ -225,9 +305,8 @@ def _warm_start(log_prob, n_walkers, D0_range, M_range, oversample=20):
               f"perturbing to fill {n_walkers - len(valid)} more")
         while len(valid) < n_walkers:
             idx = np.random.randint(len(valid))
-            perturbed = valid[idx] + 0.01 * np.array(
-                [D0_range[1] - D0_range[0], M_range[1] - M_range[0]
-                 ]) * np.random.randn(NDIM)
+            perturbed = valid[idx] + 0.01 * (highs - lows) * np.random.randn(len(param_names))
+            perturbed = np.clip(perturbed, lows, highs)
             lp = log_prob(perturbed)
             if np.isfinite(lp):
                 valid = np.vstack([valid, perturbed])
@@ -383,7 +462,7 @@ class PTSampler:
 # emcee-only sampler
 # ==================================================================
 
-def run_emcee_sampler(n_walkers, n_steps, log_likelihood, log_prior, p0,
+def run_emcee_sampler(n_walkers, n_steps, ndim, log_likelihood, log_prior, p0,
                       pool=None):
     moves = [emcee.moves.DEMove()]
     try:
@@ -393,7 +472,7 @@ def run_emcee_sampler(n_walkers, n_steps, log_likelihood, log_prior, p0,
 
     log_prob = _TemperedProb(log_likelihood, log_prior)
 
-    sampler = emcee.EnsembleSampler(n_walkers, NDIM, log_prob,
+    sampler = emcee.EnsembleSampler(n_walkers, ndim, log_prob,
                                     moves=moves, pool=pool)
 
     t0 = time.time()
@@ -406,10 +485,10 @@ def run_emcee_sampler(n_walkers, n_steps, log_likelihood, log_prior, p0,
 # dynesty sampler
 # ==================================================================
 
-def run_dynesty_sampler(log_likelihood, prior_transform_fn,
+def run_dynesty_sampler(log_likelihood, prior_transform_fn, ndim,
                         nlive=500, dlogz=0.5, pool=None):
     sampler = dynesty.DynamicNestedSampler(
-        log_likelihood, prior_transform_fn, ndim=NDIM,
+        log_likelihood, prior_transform_fn, ndim=ndim,
         bound="multi",      # multi-ellipsoid  -> tracks multiple modes
         sample="rwalk",
         pool=pool,
@@ -423,16 +502,16 @@ def run_dynesty_sampler(log_likelihood, prior_transform_fn,
 # Post-processing
 # ==================================================================
 
-def analyze_results(samples, outdir, sampler_name="pt"):
+def analyze_results(samples, outdir, param_names, labels, sampler_name="pt"):
     """Generate posterior analysis and save all outputs."""
     os.makedirs(outdir, exist_ok=True)
+    param_names = tuple(param_names)
+    labels = list(labels)
+    ndim = len(param_names)
 
     # --- raw samples ---
     np.savetxt(os.path.join(outdir, "samples.dat"), samples,
-               header="D0  m_corot")
-
-    D0_s = samples[:, 0]
-    m_s  = samples[:, 1]
+               header="  ".join(param_names))
 
     # --- statistics ---
     lines = [
@@ -441,16 +520,16 @@ def analyze_results(samples, outdir, sampler_name="pt"):
         "",
         "Parameter estimates  (median  + 68 % credible interval):",
     ]
-    for name, vals in [("D0", D0_s), ("m_corot", m_s)]:
+    for index, name in enumerate(param_names):
+        vals = samples[:, index]
         q16, q50, q84 = np.percentile(vals, [16, 50, 84])
         lines.append(f"  {name:10s} = {q50:.4f}  "
                      f"(+{q84 - q50:.4f} / -{q50 - q16:.4f})  "
                      f"[16%: {q16:.4f}  50%: {q50:.4f}  84%: {q84:.4f}]")
-    lines += [
-        "",
-        f"D0 range in samples     : [{D0_s.min():.4f}, {D0_s.max():.4f}]",
-        f"m_corot range in samples : [{m_s.min():.4f}, {m_s.max():.4f}]",
-    ]
+    lines.append("")
+    for index, name in enumerate(param_names):
+        vals = samples[:, index]
+        lines.append(f"{name} range in samples : [{vals.min():.4f}, {vals.max():.4f}]")
     summary = "\n".join(lines)
     with open(os.path.join(outdir, "summary.txt"), "w") as f:
         f.write(summary + "\n")
@@ -458,7 +537,7 @@ def analyze_results(samples, outdir, sampler_name="pt"):
 
     # --- corner plot ---
     if HAS_CORNER and HAS_MPL:
-        fig = corner.corner(samples, labels=LABELS,
+        fig = corner.corner(samples, labels=labels,
                             quantiles=[0.16, 0.5, 0.84],
                             show_titles=True, title_kwargs={"fontsize": 12})
         fig.savefig(os.path.join(outdir, "corner.png"),
@@ -468,11 +547,11 @@ def analyze_results(samples, outdir, sampler_name="pt"):
 
     # --- trace plot ---
     if HAS_MPL:
-        fig, axes = plt.subplots(NDIM, 1, figsize=(10, 3 * NDIM),
+        fig, axes = plt.subplots(ndim, 1, figsize=(10, 3 * ndim),
                                  squeeze=False)
         for i, ax in enumerate(axes.flat):
             ax.plot(samples[:, i], alpha=0.3, lw=0.5)
-            ax.set_ylabel(LABELS[i])
+            ax.set_ylabel(labels[i])
         axes[-1, 0].set_xlabel("Sample index")
         fig.tight_layout()
         fig.savefig(os.path.join(outdir, "trace.png"),
@@ -482,7 +561,7 @@ def analyze_results(samples, outdir, sampler_name="pt"):
 
     # --- 1-D posterior histograms ---
     if HAS_MPL:
-        fig, axes = plt.subplots(1, NDIM, figsize=(4 * NDIM, 4),
+        fig, axes = plt.subplots(1, ndim, figsize=(4 * ndim, 4),
                                  squeeze=False)
         for i, ax in enumerate(axes.flat):
             ax.hist(samples[:, i], bins=60, density=True, alpha=0.7,
@@ -492,7 +571,7 @@ def analyze_results(samples, outdir, sampler_name="pt"):
                        label=f"median = {q50:.3f}")
             ax.axvline(q16, color="crimson", ls="--", lw=1)
             ax.axvline(q84, color="crimson", ls="--", lw=1)
-            ax.set_xlabel(LABELS[i])
+            ax.set_xlabel(labels[i])
             ax.set_ylabel("Posterior density")
             ax.legend(fontsize=9)
         fig.tight_layout()
@@ -502,7 +581,8 @@ def analyze_results(samples, outdir, sampler_name="pt"):
         print(f"  -> {outdir}/posterior.png")
 
     # --- binned 1-D posteriors as text (for external plotting) ---
-    for name, vals in [("D0", D0_s), ("m_corot", m_s)]:
+    for index, name in enumerate(param_names):
+        vals = samples[:, index]
         hist, edges = np.histogram(vals, bins=80, density=True)
         centres = 0.5 * (edges[:-1] + edges[1:])
         np.savetxt(os.path.join(outdir, f"posterior_{name}.dat"),
@@ -515,10 +595,10 @@ def analyze_results(samples, outdir, sampler_name="pt"):
 # ==================================================================
 
 def main():
-    global D0_RANGE, M_RANGE
+    global NDIM, LABELS, PARAM_NAMES, PARAM_RANGES
 
     ap = argparse.ArgumentParser(
-        description="MCMC Bayesian Analysis of HelProp (D0, m_corot)",
+        description="MCMC Bayesian Analysis of HelProp modulation parameters",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -565,6 +645,10 @@ def main():
                     help="Magnetic polarity (-1 or +1)")
     ap.add_argument("--angle",     type=float, default=15.0,
                     help="HCS tilt angle (deg)")
+    ap.add_argument("--hcs-osc-amp", type=float, default=0.0,
+                    help="HCS tilt perturbation amplitude (deg)")
+    ap.add_argument("--hcs-osc-phase", type=float, default=0.0,
+                    help="HCS tilt perturbation phase (deg)")
     ap.add_argument("--R0",        type=float, default=1.0,
                     help="Reference rigidity (GV)")
     ap.add_argument("--indexA",    type=float, default=1.0,
@@ -590,8 +674,28 @@ def main():
                     help="Forward model backend for likelihood calls")
     ap.add_argument("--surrogate-model", default="",
                     help="Saved helprop_surrogate model for --backend surrogate")
+    ap.add_argument("--surrogate-low-model", default="",
+                    help="Low-energy saved surrogate model for dual-kernel surrogate mode")
+    ap.add_argument("--surrogate-high-model", default="",
+                    help="High-energy saved surrogate model for dual-kernel surrogate mode")
+    ap.add_argument("--surrogate-split-energy", type=float, default=1.0,
+                    help="Energy in GeV where dual surrogate kernels are joined")
+    ap.add_argument("--surrogate-blend-dex", type=float, default=0.2,
+                    help="Log10 energy width for smooth dual-kernel blending")
     ap.add_argument("--surrogate-param", action="append", default=[],
                     help="Extra learned surrogate parameter as name=value")
+    ap.add_argument(
+        "--sample-param",
+        action="append",
+        default=[],
+        help="Parameter name to sample; repeat to override inferred/default names",
+    )
+    ap.add_argument(
+        "--sample-range",
+        action="append",
+        default=[],
+        help="Sampled parameter range as name:min:max; repeat to override defaults",
+    )
 
     # parallelism
     ap.add_argument("--nproc", type=int, default=1,
@@ -608,19 +712,11 @@ def main():
 
     # prior ranges
     ap.add_argument("--D0-range", type=float, nargs=2,
-                    default=list(D0_RANGE), help="D0 prior bounds")
+                    default=list(DEFAULT_PARAM_RANGES["D0"]), help="D0 prior bounds")
     ap.add_argument("--m-range",  type=float, nargs=2,
-                    default=list(M_RANGE),  help="m_corot prior bounds")
+                    default=list(DEFAULT_PARAM_RANGES["m"]),  help="m_corot prior bounds")
 
     args = ap.parse_args()
-
-    # update global prior bounds
-    D0_RANGE = tuple(args.D0_range)
-    M_RANGE  = tuple(args.m_range)
-
-    # build prior functions as closures (carries correct ranges into workers)
-    log_prior = make_log_prior(D0_RANGE, M_RANGE)
-    prior_transform = make_prior_transform(D0_RANGE, M_RANGE)
 
     # dependency checks
     if args.sampler in ("pt", "emcee") and not HAS_EMCEE:
@@ -644,25 +740,46 @@ def main():
     print(f"  {len(E_obs)} data points, "
           f"E in [{E_obs.min():.3f}, {E_obs.max():.3f}] GeV")
 
+    explicit_ranges = _parse_range_option_items(args.sample_range)
+
     if args.backend == "surrogate":
-        if not args.surrogate_model:
+        dual_surrogate = bool(args.surrogate_low_model or args.surrogate_high_model)
+        if dual_surrogate and not (args.surrogate_low_model and args.surrogate_high_model):
+            sys.exit("ERROR: both --surrogate-low-model and --surrogate-high-model are required for dual-kernel surrogate mode")
+        if not dual_surrogate and not args.surrogate_model:
             sys.exit("ERROR: --surrogate-model is required with --backend surrogate")
         surrogate_options = {
             "B0": args.B0,
             "angle": args.angle,
+            "hcs-osc-amp": args.hcs_osc_amp,
+            "hcs-osc-phase": args.hcs_osc_phase,
             "indexA": args.indexA,
             "indexB": args.indexB,
         }
         surrogate_options.update(_parse_fixed_option_items(args.surrogate_param))
-        runner = SurrogateRunner(args.surrogate_model, args.lis,
-                                 fixed_options=surrogate_options,
-                                 verbose=args.verbose)
+        if dual_surrogate:
+            runner = CompositeSurrogateRunner(
+                args.surrogate_low_model,
+                args.surrogate_high_model,
+                args.lis,
+                split_energy=args.surrogate_split_energy,
+                blend_dex=args.surrogate_blend_dex,
+                fixed_options=surrogate_options,
+                verbose=args.verbose,
+            )
+        else:
+            runner = SurrogateRunner(args.surrogate_model, args.lis,
+                                     fixed_options=surrogate_options,
+                                     verbose=args.verbose)
+        inferred_names = tuple(runner.learned_parameters())
     else:
         # set up runner — fixed physics + simulation options
         common_opts = [
             f"--A={args.A}", f"--Z={args.Z}",
             f"--B0={args.B0}", f"--polarity={args.polarity}",
             f"--angle={args.angle}", f"--R0={args.R0}",
+            f"--hcs-osc-amp={args.hcs_osc_amp}",
+            f"--hcs-osc-phase={args.hcs_osc_phase}",
             f"--indexA={args.indexA}", f"--indexB={args.indexB}",
             f"--number={args.nparticles}",
             f"--nthread={args.nthread}",
@@ -674,7 +791,40 @@ def main():
         runner = HelPropRunner(args.helprop, args.lis, common_opts,
                                verbose=args.verbose, timeout=600,
                                use_cache=not args.no_cache)
-    log_likelihood = make_log_likelihood(runner, E_obs, F_obs, err_obs)
+        inferred_names = ("D0", "m")
+
+    param_names = tuple(args.sample_param) if args.sample_param else inferred_names
+    if not param_names:
+        sys.exit("ERROR: no sampled parameters were selected")
+    if args.backend == "helprop" and param_names != ("D0", "m"):
+        sys.exit("ERROR: --backend helprop currently supports sampling only D0 and m")
+    repeated_params = [name for name in param_names if param_names.count(name) > 1]
+    if repeated_params:
+        sys.exit(f"ERROR: duplicate sampled parameters: {', '.join(sorted(set(repeated_params)))}")
+    param_ranges = _default_ranges_for(param_names)
+    param_ranges["D0"] = tuple(args.D0_range)
+    param_ranges["m"] = tuple(args.m_range)
+    param_ranges.update(explicit_ranges)
+    missing_ranges = [name for name in param_names if name not in param_ranges]
+    if missing_ranges:
+        sys.exit(f"ERROR: missing ranges for sampled parameters: {', '.join(missing_ranges)}")
+    unused_ranges = set(param_ranges).difference(param_names)
+    for name in unused_ranges:
+        param_ranges.pop(name, None)
+
+    PARAM_NAMES = param_names
+    PARAM_RANGES = param_ranges
+    NDIM = len(param_names)
+    LABELS = [DEFAULT_PARAM_LABELS.get(name, name) for name in param_names]
+
+    print("  Sampled parameters:")
+    for name in param_names:
+        low, high = param_ranges[name]
+        print(f"    {name}: [{low:g}, {high:g}]")
+
+    log_prior = make_log_prior(param_names, param_ranges)
+    prior_transform = make_prior_transform(param_names, param_ranges)
+    log_likelihood = make_log_likelihood(runner, E_obs, F_obs, err_obs, param_names)
 
     np.random.seed(args.seed)
     os.makedirs(args.outdir, exist_ok=True)
@@ -703,7 +853,7 @@ def main():
             # warm-start each temperature independently
             for t in range(args.ntemps):
                 p0[t] = _warm_start(_warm_prob, args.nwalkers,
-                                    D0_RANGE, M_RANGE)
+                                    param_names, param_ranges)
 
             sampler = PTSampler(args.ntemps, args.nwalkers, NDIM,
                                 log_likelihood, log_prior, Tmax=args.Tmax,
@@ -719,22 +869,24 @@ def main():
 
         elif args.sampler == "emcee":
             p0 = _warm_start(_warm_prob, args.nwalkers,
-                             D0_RANGE, M_RANGE)
+                             param_names, param_ranges)
 
-            sampler = run_emcee_sampler(args.nwalkers, args.nsteps,
+            sampler = run_emcee_sampler(args.nwalkers, args.nsteps, NDIM,
                                         log_likelihood, log_prior, p0,
                                         pool=pool)
             samples = sampler.get_chain(flat=True, discard=args.nburn)
 
             try:
                 tau = sampler.get_autocorr_time(quiet=True)
-                print(f"  Autocorrelation times: D0={tau[0]:.1f}  "
-                      f"m_corot={tau[1]:.1f}")
+                tau_summary = "  ".join(
+                    f"{name}={value:.1f}" for name, value in zip(param_names, tau)
+                )
+                print(f"  Autocorrelation times: {tau_summary}")
             except Exception:
                 pass
 
         elif args.sampler == "dynesty":
-            sampler = run_dynesty_sampler(log_likelihood, prior_transform,
+            sampler = run_dynesty_sampler(log_likelihood, prior_transform, NDIM,
                                           pool=pool)
             from dynesty import utils as dyfunc
             weights = np.exp(sampler.results.logwt - sampler.results.logz[-1])
@@ -747,7 +899,7 @@ def main():
               f"hit_rate={rstats['hit_rate']:.2%}")
 
         print(f"\nAnalyzing {len(samples)} posterior samples ...")
-        analyze_results(samples, args.outdir, sampler_name=args.sampler)
+        analyze_results(samples, args.outdir, param_names, LABELS, sampler_name=args.sampler)
 
     finally:
         # clean up worker pool (even on exception)

@@ -321,13 +321,16 @@ class ConditionalKernelSurrogate:
 def ekin_to_momentum(ekin: Sequence[float], A: int = 1) -> np.ndarray:
     """Convert kinetic energy per nucleon to particle momentum.
 
-    This matches the helper in ``src/HelProp.cc`` for proton mass units.
+    This matches the helper in ``src/HelProp.cc``.  For nuclei, ``ekin`` is
+    kinetic energy per nucleon.  For leptons marked by ``A <= 0``, ``ekin`` is
+    the particle kinetic energy and the electron mass is used.
     """
     ekin_array = _as_1d_positive("ekin", ekin)
-    if A <= 0:
-        raise ValueError("A must be positive")
     m_proton = 0.938272
-    return np.sqrt(ekin_array * (ekin_array + 2.0 * m_proton)) * A
+    m_electron = 5.10998e-4
+    if A > 0:
+        return np.sqrt(ekin_array * (ekin_array + 2.0 * m_proton)) * A
+    return np.sqrt(ekin_array * (ekin_array + 2.0 * m_electron))
 
 
 def fold_lis(

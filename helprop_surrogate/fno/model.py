@@ -210,17 +210,27 @@ class TorchFNOTransferMatrixSurrogate:
         theta_array = self._theta_matrix(theta)
         return self.predict_matrices(theta_array)[0]
 
-    def predict_matrices(self, theta: Sequence[Sequence[float]] | np.ndarray) -> np.ndarray:
+    def predict_matrices(
+        self,
+        theta: Sequence[Sequence[float]] | np.ndarray,
+        batch_size: int | None = None,
+    ) -> np.ndarray:
         """Predict matrices for a batch of parameter vectors."""
         self._require_fit()
         torch, _, F = _require_torch()
         model = self._model_for_inference(torch)
         theta_array = self._prepare_theta(theta, fit=False)
+        step = self.batch_size if batch_size is None else int(batch_size)
+        if step <= 0:
+            raise ValueError("batch_size must be positive")
+        probs = []
         with torch.no_grad():
-            theta_tensor = torch.as_tensor(theta_array, dtype=torch.float32, device=self.device_)
-            logits = model(self._input_grid(theta_tensor, torch))
-            probs = F.softmax(logits, dim=-1).detach().cpu().numpy()
-        return probs
+            for start in range(0, theta_array.shape[0], step):
+                stop = start + step
+                theta_tensor = torch.as_tensor(theta_array[start:stop], dtype=torch.float32, device=self.device_)
+                logits = model(self._input_grid(theta_tensor, torch))
+                probs.append(F.softmax(logits, dim=-1).detach().cpu().numpy())
+        return np.concatenate(probs, axis=0)
 
     def predict_spectrum(
         self,

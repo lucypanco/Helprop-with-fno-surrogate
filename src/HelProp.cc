@@ -116,11 +116,19 @@ vector<particle> simulating(const particle& template_particle, int number, int t
 }
 
 const double m_proton = 0.938272 * GeV;
+const double m_electron = 5.10998e-4 * GeV;
+inline double particle_energy_axis(double ek, int A) {
+  return A > 0 ? ek / A : ek;
+}
 double ekin2p(double ekin, int A) { // ekin/nuc -> momentum
-  return sqrt(ekin * (ekin + 2. * m_proton)) * A;
+  if (A > 0)
+    return sqrt(ekin * (ekin + 2. * m_proton)) * A;
+  return sqrt(ekin * (ekin + 2. * m_electron));
 }
 double p2ekin(double p, int A) { // momentum -> ekin/nuc
-  return sqrt(p / A * p / A + m_proton * m_proton) - m_proton;
+  if (A > 0)
+    return sqrt(p / A * p / A + m_proton * m_proton) - m_proton;
+  return sqrt(p * p + m_electron * m_electron) - m_electron;
 }
 inline vector<double> get_bound(const vector<double>& x) {
   vector<double> bound;
@@ -144,7 +152,7 @@ vector<double> count_GreenFunction(const vector<particle>& Particle, const vecto
 
   int number = Particle.size();
   for (const auto& p : Particle) {
-    int ibin = upper_bound(bound.begin(), bound.end(), p.Ek / p.A) - bound.begin();
+    int ibin = upper_bound(bound.begin(), bound.end(), particle_energy_axis(p.Ek, p.A)) - bound.begin();
 
     if (0 < ibin && ibin < bin.size() + 1)
       bin[ibin - 1] += 1;
@@ -238,7 +246,7 @@ int main(int argc, char* argv[]) {
   particle one(args);
 
   for (int i = 0; i < ETOA.size(); i++) {
-    one.Ek = ETOA[i] * A;
+    one.Ek = A > 0 ? ETOA[i] * A : ETOA[i];
     one.fix_seed = fix_seed;
     one.seed = seed + i * number;
 
