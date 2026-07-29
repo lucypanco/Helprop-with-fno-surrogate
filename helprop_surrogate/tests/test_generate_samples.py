@@ -58,9 +58,9 @@ class GenerateSamplesTest(unittest.TestCase):
         self.assertEqual(cmd[-1], "run.bson")
 
     def test_fixed_to_helprop_options_preserves_names(self):
-        options = fixed_to_helprop_options({"A": 1.0, "hcs-osc-amp": 0.0})
+        options = fixed_to_helprop_options({"A": 1.0, "hcs-osc-amp": 0.0, "hcs-omega": 1.0})
 
-        self.assertEqual(options, ["--A=1", "--hcs-osc-amp=0"])
+        self.assertEqual(options, ["--A=1", "--hcs-osc-amp=0", "--hcs-omega=1"])
 
     def test_make_sample_runs_assigns_stable_outputs_and_seeds(self):
         design = [{"D0": 1.0, "m": -0.1}, {"D0": 2.0, "m": 0.2}]

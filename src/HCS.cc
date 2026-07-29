@@ -22,6 +22,7 @@ double HCS::angle_osc_amp = 0;
 double HCS::angle_osc_phase = 0;
 HCS::HCSFORM HCS::hcsform = Jokipii_Thomas;
 const double HCS::Omega = 2*Unit::pi/27.5/Unit::day;
+double HCS::hcs_omega = HCS::Omega;
 std::vector<double> HCS::angle_axis;
 std::vector<std::string> HCS::table_names;
 std::vector<KDInterp*> HCS::tables;
@@ -176,7 +177,7 @@ void HCS::r_bound(double r, double phi, double phi0, double& rlow, double& rup) 
 
 double HCS::angle_eff() const {
   if (angle_osc_amp == 0) return angle;
-  return angle + angle_osc_amp * sin(angle_osc_phase);
+  return angle + angle_osc_amp * sin(hcs_omega * t + angle_osc_phase);
 }
 
 double HCS::Theta_S_Jokipii_Thomas(double phi0) {

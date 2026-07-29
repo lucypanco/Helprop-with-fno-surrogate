@@ -34,10 +34,12 @@ Usage
     --sample-param indexB \
     --sample-param angle \
     --sample-param hcs-osc-amp \
+    --sample-param hcs-omega \
     --sample-range m:-3:3 \
     --sample-range angle:5:45 \
     --sample-range hcs-osc-amp:0:10 \
-    --outdir chains_dual_6d_phase0 \
+    --sample-range hcs-omega:0:4 \
+    --outdir chains_dual_7d_phase0 \
     --verbose
 
 
@@ -112,6 +114,7 @@ DEFAULT_PARAM_RANGES = {
     "angle": (5.0, 30.0),
     "hcs-osc-amp": (0.0, 10.0),
     "hcs-osc-phase": (0.0, 360.0),
+    "hcs-omega": (0.0, 4.0),
 }
 DEFAULT_PARAM_LABELS = {
     "D0": r"$D_0\;(10^{22}\,\mathrm{cm^2/s})$",
@@ -121,6 +124,7 @@ DEFAULT_PARAM_LABELS = {
     "angle": r"$\alpha_{\mathrm{HCS}}$",
     "hcs-osc-amp": r"$\Delta\alpha_{\mathrm{HCS}}$",
     "hcs-osc-phase": r"$\phi_{\mathrm{HCS}}$",
+    "hcs-omega": r"$\omega_{\mathrm{HCS}}/\Omega$",
 }
 NDIM = 2
 LABELS = [DEFAULT_PARAM_LABELS["D0"], DEFAULT_PARAM_LABELS["m"]]
@@ -649,6 +653,8 @@ def main():
                     help="HCS tilt perturbation amplitude (deg)")
     ap.add_argument("--hcs-osc-phase", type=float, default=0.0,
                     help="HCS tilt perturbation phase (deg)")
+    ap.add_argument("--hcs-omega", type=float, default=1.0,
+                    help="HCS tilt perturbation angular frequency in units of HCS::Omega")
     ap.add_argument("--R0",        type=float, default=1.0,
                     help="Reference rigidity (GV)")
     ap.add_argument("--indexA",    type=float, default=1.0,
@@ -753,6 +759,7 @@ def main():
             "angle": args.angle,
             "hcs-osc-amp": args.hcs_osc_amp,
             "hcs-osc-phase": args.hcs_osc_phase,
+            "hcs-omega": args.hcs_omega,
             "indexA": args.indexA,
             "indexB": args.indexB,
         }
@@ -780,6 +787,7 @@ def main():
             f"--angle={args.angle}", f"--R0={args.R0}",
             f"--hcs-osc-amp={args.hcs_osc_amp}",
             f"--hcs-osc-phase={args.hcs_osc_phase}",
+            f"--hcs-omega={args.hcs_omega}",
             f"--indexA={args.indexA}", f"--indexB={args.indexB}",
             f"--number={args.nparticles}",
             f"--nthread={args.nthread}",

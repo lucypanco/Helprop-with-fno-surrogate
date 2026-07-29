@@ -191,11 +191,11 @@ class HelPropKernelModelTest(unittest.TestCase):
                 )
 
     def test_parse_helpers_preserve_names(self):
-        fixed = parse_key_value_options(["hcs-osc-amp=0", "Z=1"])
-        ranges = parse_range_options(["hcs-osc-phase:0:360"])
+        fixed = parse_key_value_options(["hcs-osc-amp=0", "hcs-omega=1", "Z=1"])
+        ranges = parse_range_options(["hcs-osc-phase:0:360", "hcs-omega:0:4"])
 
-        self.assertEqual(fixed, {"hcs-osc-amp": 0.0, "Z": 1.0})
-        self.assertEqual(ranges, {"hcs-osc-phase": (0.0, 360.0)})
+        self.assertEqual(fixed, {"hcs-osc-amp": 0.0, "hcs-omega": 1.0, "Z": 1.0})
+        self.assertEqual(ranges, {"hcs-osc-phase": (0.0, 360.0), "hcs-omega": (0.0, 4.0)})
 
 
 if __name__ == "__main__":

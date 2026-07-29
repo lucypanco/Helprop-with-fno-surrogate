@@ -40,20 +40,21 @@ python -m helprop_surrogate.matrix_data \
   --helprop ./HelProp \
   --runs-root surrogate_runs \
   --n-runs 1000 \
-  --learn D0 m indexA indexB angle hcs-osc-amp hcs-osc-phase \
+  --learn D0 m indexA indexB angle hcs-osc-amp hcs-osc-phase hcs-omega \
   --range D0:0.1:15 \
-  --range m:-3.5:3.5 \
+  --range m:-4:4 \
   --range indexA:0:3.0 \
   --range indexB:0:3.0 \
-  --range angle:5:40 \
+  --range angle:5:45 \
   --range hcs-osc-amp:0:10 \
   --range hcs-osc-phase:0:360 \
+  --range hcs-omega:0:4 \
   --fixed A=1 \
   --fixed Z=1 \
   --fixed polarity=-1 \
   --fixed R0=1 \
   --etoa 0.001,1e7,90\
-  --elis 0.001,1e8,120\
+  --elis 0.001,1e7,90\
   --number 400\
   --nthread 8 \
   --jobs 3
@@ -110,7 +111,7 @@ python -m helprop_surrogate.matrix_data \
   --helprop ./HelProp \
   --runs-root surrogate_runs \
   --n-runs 500 \
-  --learn D0 m indexA indexB angle hcs-osc-amp hcs-osc-phase \
+  --learn D0 m indexA indexB angle hcs-osc-amp hcs-osc-phase hcs-omega \
   --range D0:0.1:50 \
   --range m:-2:2 \
   --range indexA:0.5:2.0 \
@@ -118,6 +119,7 @@ python -m helprop_surrogate.matrix_data \
   --range angle:5:30 \
   --range hcs-osc-amp:0:10 \
   --range hcs-osc-phase:0:360 \
+  --range hcs-omega:0:4 \
   --fixed A=0 \
   --fixed Z=-1 \
   --fixed polarity=-1 \
@@ -190,7 +192,7 @@ The saved model is compatible with the existing surrogate wrapper:
 
 ```bash
 python -m helprop_surrogate.predict_kernel \
-  surrogate_runs/run_0001/kernel_fno.pkl \
+  surrogate_runs/run_0003/kernel_fno.pkl \
   --D0 5 \
   --m 0 \
   --matrix-out surrogate_runs/run_0001/M_pred.txt
@@ -200,17 +202,15 @@ Fold a LIS spectrum:
 
 ```bash
 python -m helprop_surrogate.predict_kernel \
-  fno_runs/run_0003/kernel_fno.pkl \
+  surrogate_runs/run_0003/kernel_fno.pkl \
   --D0 5 \
   --m 0 \
   --angle 15\
   --indexA 1 \
   --indexB 1 \
-  --hcs-osc-phase 0 \
-  --hcs-osc-amp 0 \
   --lis Proton_spectrum.txt \
-  --spectrum-out fno_runs/run_0003/spectrum_pred.txt \
-  --spectrum-etoa 0.001,1e6,250
+  --spectrum-out fno_runs/run_0003/spectrum_pred_new.txt \
+  --spectrum-etoa 0.1,1e5,250
 ```
 
 During folded-spectrum prediction, the LIS file is interpolated onto the
@@ -244,7 +244,17 @@ python helprop_mcmc/mcmc_analysis.py \
     --nburn 1200 \
     --nproc 1 \
     --A 1 --Z 1 --polarity -1 --R0 1 --B0 5 \
-    --outdir chains_dual_7d --sample-range m:-3:3 angle:5:35 hcs-osc-amp:-6:6
+    --sample-param D0 \
+    --sample-param m \
+    --sample-param indexA \
+    --sample-param indexB \
+    --sample-param angle \
+    --sample-range D0:0.1:20 \
+    --sample-range m:-4:4 \
+    --sample-range indexA:0.5:2.0 \
+    --sample-range indexB:0.5:2.0 \
+    --sample-range angle:5:45\
+    --outdir chains_dual_5d
 
 ```
 
@@ -255,7 +265,7 @@ python -m helprop_surrogate.rebuild_matrix_npz \
     surrogate_runs/run_0004/data/*.bson \
     surrogate_runs/run_0005/data/*.bson \
     --out surrogate_runs/merged_1000/data/matrices.npz \
-    --learn D0 m indexA indexB angle hcs-osc-amp hcs-osc-phase \
+    --learn D0 m indexA indexB angle hcs-osc-amp hcs-osc-phase hcs-omega \
     --seed 12345
 ```
 python -m helprop_surrogate.fno.train \
@@ -282,5 +292,27 @@ python -m helprop_surrogate.fno.train \
     --range angle:5:30 \
     --range hcs-osc-amp:0:10 \
     --range hcs-osc-phase:0:360 \
+    --range hcs-omega:0:4 \
     --checkpoint-every 50 \
     --verbose-train
+
+python helprop_mcmc/mcmc_analysis.py \
+    --backend surrogate \
+    --surrogate-model surrogate_runs/run_0003/kernel_fno.pkl \
+    --lis ./Proton_spectrum.txt \
+    --obs ./ProtonModulated_ekin.txt \
+    --sampler dynesty \
+    --nwalkers 60 \
+    --nsteps 7000 \
+    --nburn 1200 \
+    --nproc 1 \
+    --A 1 --Z 1 --polarity -1 --R0 1 --B0 5 --angle 35\
+    --sample-param D0 \
+    --sample-param m \
+    --sample-param indexA \
+    --sample-param indexB \
+    --sample-range D0:0.1:15 \
+    --sample-range m:-4:4 \
+    --sample-range indexA:0.5:2.0 \
+    --sample-range indexB:0.5:2.0 \
+    --outdir chains_dual_4d

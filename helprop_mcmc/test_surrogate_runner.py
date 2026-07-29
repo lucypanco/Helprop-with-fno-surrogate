@@ -131,7 +131,7 @@ class SurrogateRunnerTest(unittest.TestCase):
         self.assertEqual(stats["cache_size"], 1)
 
     def test_composite_runner_accepts_full_theta_mapping(self):
-        names = ("D0", "m", "indexA", "indexB", "angle", "hcs-osc-amp", "hcs-osc-phase")
+        names = ("D0", "m", "indexA", "indexB", "angle", "hcs-osc-amp", "hcs-osc-phase", "hcs-omega")
         low_model = HelPropKernelModel(
             kernel=ConstantSpectrumKernel(param_names=names, scale=1.0),
             learned=names,
@@ -163,6 +163,7 @@ class SurrogateRunnerTest(unittest.TestCase):
                 "angle": 15.0,
                 "hcs-osc-amp": 0.0,
                 "hcs-osc-phase": 180.0,
+                "hcs-omega": 1.0,
             })
 
         values = interp(np.asarray([0.2, 2.0]))

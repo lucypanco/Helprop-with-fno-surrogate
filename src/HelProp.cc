@@ -184,6 +184,7 @@ This Routine is used to simulate the modulation of particle within heliosphere.
       -a ANGLE, --angle ANGLE           Tilt angle of HCS in deg [default: 15].
       --hcs-osc-amp AMP                 HCS tilt perturbation amplitude in deg [default: 0].
       --hcs-osc-phase PHASE             HCS tilt perturbation phase in deg [default: 0].
+      --hcs-omega OMEGA                 HCS tilt perturbation angular frequency in units of HCS::Omega [default: 1].
       -D D0, --D0 D0                    Reference diffusion coefficient in unit 1e22 cm^2/s [default: 5].
       -R R0, --R0 R0                    Reference rigidity for the diffusion coefficient in unit GV [default: 1].
       --indexA INDEXA                   Diffusion index a [default: 1].
@@ -218,6 +219,7 @@ int main(int argc, char* argv[]) {
   HCS::angle = stod(args.at("--angle").asString()) * Unit::deg;
   HCS::angle_osc_amp = stod(args.at("--hcs-osc-amp").asString()) * Unit::deg;
   HCS::angle_osc_phase = stod(args.at("--hcs-osc-phase").asString()) * Unit::deg;
+  HCS::hcs_omega = stod(args.at("--hcs-omega").asString()) * HCS::Omega;
   HCS::hcsform = HCS::Kota_Jokipii;
 
   // set spectrum energy bin

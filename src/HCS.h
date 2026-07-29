@@ -21,6 +21,7 @@ class HCS {
     enum HCSFORM { Jokipii_Thomas, Kota_Jokipii };
     static HCSFORM hcsform;
     static const double Omega;                        //angular velocity corresponding to 27.5 day
+    static double hcs_omega;                    //angular frequency of HCS tilt perturbation
     static double angle;                        //baseline tilt angle of HCS
     static double angle_osc_amp;                //tilt perturbation amplitude
     static double angle_osc_phase;              //tilt perturbation phase

@@ -196,6 +196,7 @@ void particle::step(const string& logname, int max_step) {
     rigidity = M_p / (Z * e);
     V_p = M_p / E * c_speed;
     Vs = Wind();
+    hcs.t = Dt;
 
     // std::cout << "Mp:  " << r << "  " << M_p/GeV << "  " << Ek/GeV << "  " << mp/GeV << std::endl;
     // getchar();
