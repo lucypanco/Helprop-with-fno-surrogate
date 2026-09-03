@@ -1,24 +1,27 @@
-# MCMC Bayesian Analysis of HelProp
+# MCMC Bayesian Analysis with the HelProp surrogate
 
 ## 1. Objective
 
-Fit HelProp modulation parameters **D₀** (diffusion coefficient) and **m_corot** (co-rotation factor) to observed cosmic ray spectra using MCMC Bayesian inference.
+Fit surrogate-model parameters to observed cosmic ray spectra using MCMC Bayesian inference. The MCMC entry point uses the surrogate backend only; the standalone HelProp executable is not selected or launched here.
+
+Use `--surrogate-model` (or the low/high surrogate pair) to select the
+forward model. The `--lis` argument accepts either a LIS file path or the
+literal value `formula`; there is no separate backend or LIS-mode selector.
 
 ### Target Parameters
 
 | Parameter     | HelProp Flag | Default | Unit                | Physical Meaning                          |
 |---------------|-------------|---------|---------------------|-------------------------------------------|
 | D₀            | `--D0`      | 5       | 10²² cm²/s         | Reference diffusion coefficient           |
-| m_corot       | `--m`       | 0       | dimensionless       | Co-rotation factor in azimuthal drift     |
+| m | fixed at 0 | dimensionless | Permanently fixed; not sampled |
 
 ## 2. Overview
 
 The workflow is entirely **Python-driven**. Each MCMC iteration:
 
-1. Proposes a (D₀, m_corot) pair.
-2. Runs `HelProp` as a subprocess with those parameters, using the **same given LIS input by inspec args** (no `--etoa` flag).
-3. Reads the modulated output spectrum.
-4. Uses **log-linear interpolation** (matching HelProp's `LogInterp`) to evaluate the model at the **observed energy points**.
+1. Proposes the active surrogate parameters and proton LIS parameters.
+2. Evaluates the saved surrogate transfer model with a fixed LIS file or Shen's analytic proton LIS.
+3. Folds the LIS through the surrogate and interpolates the result at the observed energies.
 5. Computes the **log-likelihood** from the residuals.
 6. Accepts/rejects via the MCMC sampler.
 
@@ -47,13 +50,13 @@ Each MCMC step calls HelProp with:
 Where **common_opts** must include the varying parameters:
 
 ```bash
---D0 <D0_val> --m <m_corot_val> [other_fixed_opts]
+--D0 <D0_val> [other_fixed_opts]  # m is fixed to 0
 ```
 
 ### Key Notes
 
-- **No `--etoa` flag** is passed. HelProp uses the LIS energy grid as both TOA and ELIS (line 220-223 in `HelProp.cc`), producing output at the same energy points as the LIS input.
-- **The LIS input is fixed** across all MCMC iterations. It defines the energy grid for the modulated output.
+- In file mode, no `--etoa` flag is passed: HelProp uses the LIS energy grid as both TOA and ELIS. Formula mode instead passes explicit logarithmic TOA and LIS grids.
+- **The LIS input is fixed** across all MCMC iterations in file mode. Formula mode keeps the energy grid fixed but regenerates the flux values from the sampled LIS parameters.
 - **Output format**: Use `--iotype TXT` (default) or `--iotype CSV` for easy parsing in Python.
 
 ### Fixed Options (should match your experiment)
@@ -232,7 +235,9 @@ Each MCMC step runs the full particle simulation. Key optimizations:
 
 ### 6.2 Precomputed Green's Function (Advanced)
 
-If D₀ and m_corot are the **only** varying parameters, the Green's function matrix `weight[i][j]` in `HelProp.cc` (line 246) depends on both `D0` and `m_corot` via the particle trajectories. It **cannot** be cached separately — it must be recomputed for each parameter set.
+The surrogate cache is keyed by the active learned parameters and LIS
+parameters. The co-rotation parameter `m` is fixed to zero and is never
+sampled.
 
 However, `--number` can be **reduced** during burn-in (e.g., 100-500 particles) and **increased** for the final production run (1000+).
 
@@ -302,7 +307,7 @@ Writing/reading a single output file per MCMC step is cheap relative to the simu
 ## 9. Expected Output
 
 - `chains/samples.dat` — flattened chain of shape `(n_steps * nwalkers, 2)`
-- Corner plot: `corner.corner(samples, labels=["D0", "m_corot"])`
+- Corner plot: `corner.corner(samples, labels=param_names)`
 - Print summary: mean, std, 16th/50th/84th percentiles of the posterior
 
 ## 10. Troubleshooting
@@ -314,3 +319,80 @@ Writing/reading a single output file per MCMC step is cheap relative to the simu
 | All log_probability = -inf            | Prior rejection or HelProp failure       | Check stderr of subprocess             |
 | MCMC doesn't converge                | Too few walkers or steps                 | Increase walkers/steps; check trace   |
 | Slow chains (hours+)                 | Too many particles per step              | Reduce `--number` for burn-in          |
+
+## 11. Formula LIS mode (Shen et al. 2025)
+
+The MCMC can generate the LIS internally with Shen et al. (2025), Equation
+(5), instead of reading a LIS file:
+
+```text
+J_LIS(E) = a0 (E/Ec)^a1 [1 + (E/a2)^a3]^a4 [1 + (E/a5)^a6]^a7
+Ec = 1 GeV/n
+```
+
+Shen et al. (2025), Table 2, proton fit:
+
+```text
+a0 = 5660.3       a1 = -0.70814    a2 = 0.067728   a3 = -1.7053
+a4 = -0.54184     a5 = 1.6393      a6 = 1.5554     a7 = -1.3292
+```
+
+The command below uses practical bounds around these best-fit values. They
+are not published confidence intervals. `m` is permanently fixed to zero and
+is not a command-line or sampled parameter.
+
+Run it with `--lis formula`. The default sampled parameters are `D0` and
+all eight Shen parameters `lis_a0` through `lis_a7`; `m` is fixed at zero.
+The `--lis-a0` through `--lis-a7` options fix individual coefficients while
+the source is evaluated. A coefficient listed with `--sample-param` is
+sampled instead and replaces its fixed value at every likelihood call.
+To omit `lis_a0`, explicitly list the sampled parameters with
+`--sample-param`; in that case the existing analytical normalization
+profiling can be enabled.
+
+Example:
+
+```bash
+python helprop_mcmc/mcmc_analysis.py \
+  --lis formula --obs data/obs_data.dat \
+  --lis-a0 5660.3 --lis-bins 256 --lis-min 1e-4 --lis-max 1000 \
+  --surrogate-model model.pkl --sampler dynesty --nproc 1 \
+  --sample-param D0 \
+  --sample-param lis_a0 --sample-param lis_a1 --sample-param lis_a2 \
+  --sample-param lis_a3 --sample-param lis_a4 --sample-param lis_a5 \
+  --sample-param lis_a6 --sample-param lis_a7 \
+  --sample-range lis_a0:1000:10000 \
+  --sample-range lis_a1:-1:-0.4 \
+  --sample-range lis_a2:0.03:0.12 \
+  --sample-range lis_a3:-3:-0.8 \
+  --sample-range lis_a4:-1.2:0 \
+  --sample-range lis_a5:0.8:3 \
+  --sample-range lis_a6:0.8:2.5 \
+  --sample-range lis_a7:-2.5:-0.5
+```
+
+To keep any Shen LIS coefficient fixed while sampling other parameters, use
+`--lis-a0` through `--lis-a7` (underscore spellings such as `--lis_a6` are
+also accepted). For example:
+
+```bash
+  --lis-a6 1.53 --lis-a7 -1.2
+```
+
+If a coefficient is also listed with `--sample-param`, the sampled value takes
+precedence. An explicitly supplied `--lis-a0` is kept fixed; the default
+analytic profiling of `a0` is used only when `lis_a0` is neither sampled nor
+explicitly fixed.
+
+The eleven TOA bins are observations, not eleven LIS bins. The formula is
+evaluated on a logarithmic LIS quadrature grid; 256 is a reasonable starting
+point, and numerical convergence should be checked with 128, 256, and 512
+bins. Increasing LIS bins changes numerical accuracy, not the number of
+fitted parameters. Keep the LIS range broad enough to cover the energies
+sampled by modulation; the formula-mode defaults use `1e-4 GeV` to
+`max(100 GeV, 100 E_TOA,max)`.
+
+With only eleven TOA points, fitting `D0` and eight LIS parameters is nearly
+underconstrained. Use informative LIS priors or add Voyager/high-energy LIS
+data when possible, and compare posterior predictive spectra rather than
+relying only on the minimum chi-square.

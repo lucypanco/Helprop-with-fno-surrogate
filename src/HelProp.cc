@@ -9,10 +9,12 @@
 #include <iomanip>
 #include <cassert>
 #include <algorithm>
+#include <stdexcept>
 #include "loginterp.h"
 #include "docopt.h"
 #include "particle.h"
 #include "IO.h"
+#include "kinematics.h"
 
 //此处是主文件，有选项说明
 using namespace std;
@@ -36,9 +38,14 @@ vector<string> split(const string& str, const string& splitor)
 
 vector<double> get_ekin(const string& ekin_opt) {
     vector<string> eks = split(ekin_opt, ",");
+    if (eks.size() != 3)
+      throw invalid_argument("energy grid must use min,max,nbin");
     double ekmin = stod(eks[0]) * GeV;
     double ekmax = stod(eks[1]) * GeV;
     int n = stoi(eks[2]);
+
+    if (n < 2 || ekmin <= 0 || ekmax <= ekmin)
+      throw invalid_argument("energy grid must have n >= 2 and 0 < min < max");
 
     vector<double> ekin;
     for (double i = 0; i < n; i++)
@@ -115,21 +122,6 @@ vector<particle> simulating(const particle& template_particle, int number, int t
   return Particle;
 }
 
-const double m_proton = 0.938272 * GeV;
-const double m_electron = 5.10998e-4 * GeV;
-inline double particle_energy_axis(double ek, int A) {
-  return A > 0 ? ek / A : ek;
-}
-double ekin2p(double ekin, int A) { // ekin/nuc -> momentum
-  if (A > 0)
-    return sqrt(ekin * (ekin + 2. * m_proton)) * A;
-  return sqrt(ekin * (ekin + 2. * m_electron));
-}
-double p2ekin(double p, int A) { // momentum -> ekin/nuc
-  if (A > 0)
-    return sqrt(p / A * p / A + m_proton * m_proton) - m_proton;
-  return sqrt(p * p + m_electron * m_electron) - m_electron;
-}
 inline vector<double> get_bound(const vector<double>& x) {
   vector<double> bound;
   int n = x.size();
@@ -139,6 +131,24 @@ inline vector<double> get_bound(const vector<double>& x) {
   bound.push_back(x[n-1]*sqrt(x[n-1]/x[n-2]));
 
   return bound;
+}
+
+void validate_energy_grid(const vector<double>& energy, const string& name) {
+  if (energy.size() < 2)
+    throw invalid_argument(name + " energy grid must contain at least two points");
+  for (size_t i = 0; i < energy.size(); i++) {
+    if (!isfinite(energy[i]) || energy[i] <= 0 || (i > 0 && energy[i] <= energy[i - 1]))
+      throw invalid_argument(name + " energy grid must be finite, positive, and strictly increasing");
+  }
+}
+
+void validate_spectrum(const vector<double>& energy, const vector<double>& flux, const string& name) {
+  validate_energy_grid(energy, name);
+  if (flux.size() != energy.size())
+    throw invalid_argument(name + " energy and flux arrays must have the same size");
+  for (const auto value : flux)
+    if (!isfinite(value) || value <= 0)
+      throw invalid_argument(name + " flux must be finite and positive");
 }
 
 // counting the Green function matrix, the detail could be checked in the file modulation_matrix.pdf
@@ -152,7 +162,7 @@ vector<double> count_GreenFunction(const vector<particle>& Particle, const vecto
 
   int number = Particle.size();
   for (const auto& p : Particle) {
-    int ibin = upper_bound(bound.begin(), bound.end(), particle_energy_axis(p.Ek, p.A)) - bound.begin();
+    int ibin = upper_bound(bound.begin(), bound.end(), HelPropKinematics::energy_axis(p.Ek, p.A)) - bound.begin();
 
     if (0 < ibin && ibin < bin.size() + 1)
       bin[ibin - 1] += 1;
@@ -160,6 +170,8 @@ vector<double> count_GreenFunction(const vector<particle>& Particle, const vecto
 
   double sum = 0;
   for (int i = 0; i < bin.size(); i++) sum += bin[i];
+  if (sum <= 0)
+    throw runtime_error("all simulated LIS energies fell outside the ELIS grid");
   for (auto& v : bin) v /= sum;
 
   return bin; // the returned matrix counting the probability ~ \int G(p, p') dp'
@@ -177,8 +189,8 @@ This Routine is used to simulate the modulation of particle within heliosphere.
       -s SEED, --seed SEED              The global seed of this routine, it would be automatically given if not assigned.
       -n NTH, --nthread NTH             The number of threads used in this routine [default: 1].
       --number NUMBER                   The simulation particle number in each bin[default: 1000].
-      -A A, --A A                       The nucleon number A of particle [default: 1].
-      -Z Z, --Z Z                       The charge number Z of particle [default: 1].
+      -A A, --A A                       The nucleon number A; use 0 for an electron or positron [default: 1].
+      -Z Z, --Z Z                       The charge number Z; use -1 for an electron and +1 for a positron when A=0 [default: 1].
       -B B0, --B0 B0                    The magnetic strength around the Earth in nT [default: 5].
       -p POLARITY, --polarity POLARITY  The direction polarity of the magnetic field [default: -1].
       -a ANGLE, --angle ANGLE           Tilt angle of HCS in deg [default: 15].
@@ -190,8 +202,8 @@ This Routine is used to simulate the modulation of particle within heliosphere.
       --indexA INDEXA                   Diffusion index a [default: 1].
       --indexB INDEXB                   Diffusion index b [default: 1].
       --m M                             Co-rotation factor in azimuthal drift [default: 0].
-      --etoa ETOA                       The ekin/nucleon of TOA spectrum assigned in format min,max,nbin in GeV, it would follow the input spec if not given.
-      --elis ELIS                       The ekin/nucleon of LIS spectrum assigned in format min,max,nbin in GeV, it would follow the input spec or etoa if not given.
+      --etoa ETOA                       The kinetic energy per nucleon (or particle kinetic energy for A=0) of TOA spectrum in format min,max,nbin in GeV; follows the input spec if not given.
+      --elis ELIS                       The kinetic energy per nucleon (or particle kinetic energy for A=0) of LIS spectrum in format min,max,nbin in GeV; follows the input spec or etoa if not given.
       --sample                          If given, to store the samples to the outmatrix or not, only available for BSON format.
       --iotype IOTYPE                   The input/output type (TXT, CSV, or BSON) [default: TXT].
       --hcs-table HCS_TABLE             If the dir of the table generated by gen_HCS_distance_map given, to interpolate the HCS distance with it [default: ""].
@@ -228,13 +240,19 @@ int main(int argc, char* argv[]) {
    ETOA = get_ekin(args, "--etoa");
   vector<double> flux;   // boundary differential flux
 
-  if (bool(args.at("<inspec>")))
-    io->readspec(args.at("<inspec>").asString(), EIN, flux);
+  if (bool(args.at("<inspec>")) && !io->readspec(args.at("<inspec>").asString(), EIN, flux))
+    throw invalid_argument("could not read input spectrum");
 
   if (ETOA.empty()) ETOA = EIN;
   assert(!ETOA.empty() && "The ekin axis of TOA spectrum should be given.");
 
   if (ELIS.empty()) ELIS = EIN.empty() ? ETOA : EIN;
+
+  validate_energy_grid(ETOA, "TOA");
+  validate_energy_grid(ELIS, "LIS");
+  const bool matrix_only = bool(args.at("<outmatrix>"));
+  if (!matrix_only)
+    validate_spectrum(EIN, flux, "input");
 
   cout << "ETOA.size() = " << ETOA.size() << endl;
   vector<vector<double>> weight;  // Green function matrix
@@ -245,6 +263,8 @@ int main(int argc, char* argv[]) {
   long seed = fix_seed ? args.at("--seed").asLong() : 0;
   int A = args.at("--A").asLong();
   int Z = args.at("--Z").asLong();
+  if (A < 0 || Z == 0 || (A == 0 && std::abs(Z) != 1))
+    throw invalid_argument("use A >= 0, nonzero Z, and A=0 with Z=-1 (electron) or Z=1 (positron)");
   particle one(args);
 
   for (int i = 0; i < ETOA.size(); i++) {
@@ -273,8 +293,8 @@ int main(int argc, char* argv[]) {
   }
 
   vector<double> pLIS, pTOA;
-  for (auto E : ELIS) pLIS.push_back(ekin2p(E, A));
-  for (auto E : ETOA) pTOA.push_back(ekin2p(E, A));
+  for (auto E : ELIS) pLIS.push_back(HelPropKinematics::kinetic_to_momentum(E, A));
+  for (auto E : ETOA) pTOA.push_back(HelPropKinematics::kinetic_to_momentum(E, A));
 
   LogInterp f_lis(EIN, flux);
   vector<double> FLIS;

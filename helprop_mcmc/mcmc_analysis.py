@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-MCMC Bayesian Analysis of HelProp modulation parameters.
+MCMC Bayesian Analysis using a HelProp surrogate model.
 
-Fits D0 (diffusion coefficient)  and m_corot (co-rotation factor)
-to observed cosmic ray spectra using Bayesian inference.
+Fits the surrogate's active modulation parameters and LIS parameters to
+observed cosmic ray spectra using Bayesian inference. The co-rotation
+parameter m is permanently fixed to zero.
 
 Samplers
 --------
@@ -13,11 +14,10 @@ Samplers
 
 Usage
 -----
-  python mcmc_analysis.py --helprop ../HelProp --lis ../Proton_spectrum.txt --obs ../ProtonModulated_ekin.txt --sampler emcee --nwalkers 8 --nsteps 30 --nburn 10 --nproc 0
+  python mcmc_analysis.py --surrogate-model model.pkl --lis ../Proton_spectrum.txt --obs ../ProtonModulated_ekin.txt --sampler emcee --nwalkers 8 --nsteps 30 --nburn 10 --nproc 0
   python mcmc_analysis.py --sampler pt   --ntemps 10 --nwalkers 20 --nsteps 2000
   python mcmc_analysis.py --sampler emcee --nwalkers 32 --nsteps 5000
  python helprop_mcmc/mcmc_analysis.py \
-    --backend surrogate \
     --surrogate-low-model surrogate_runs/run_0002/kernel_fno.pkl \
     --surrogate-high-model fno_runs/run_0003/kernel_fno.pkl \
     --surrogate-split-energy 1.0 \
@@ -29,13 +29,11 @@ Usage
     --A 1 --Z 1 --polarity -1 --R0 1 --B0 5 \
     --hcs-osc-phase 0 \
     --sample-param D0 \
-    --sample-param m \
     --sample-param indexA \
     --sample-param indexB \
     --sample-param angle \
     --sample-param hcs-osc-amp \
     --sample-param hcs-omega \
-    --sample-range m:-3:3 \
     --sample-range angle:5:45 \
     --sample-range hcs-osc-amp:0:10 \
     --sample-range hcs-omega:0:4 \
@@ -45,13 +43,11 @@ Usage
 
 Argument Formats
 ----------------
-  --helprop <path>       Path to HelProp executable (required)
-  --lis <path>          Path to LIS (Local Proton Spectrum) input file (required)
-                        Format: two columns -> E(GeV)  Flux
-                        Must match energy units of --obs data
+  --lis <path|formula>  LIS file path, or 'formula' for Shen et al. Eq. (5)
+                        File format: two columns -> E(GeV)  Flux
   --obs <path>          Path to observed data file (required)
                         Format: three columns -> E(GeV)  Flux  err
-                        Must use SAME energy units as --lis file!
+                        Must use SAME energy units as a file-mode --lis input!
                         Energy units must be consistent between:
                           - LIS file (column 1, in GeV)
                           - Observed data file (column 1, must match LIS units)
@@ -61,7 +57,7 @@ Common Issues
   1. Energy unit mismatch between LIS and obs data -> NaN errors, swap rate = 0
   2. LIS/obs energy range doesn't cover needed range -> invalid likelihoods
   3. Third column (err) missing in obs file -> "not enough values to unpack"
-  4. All helprop calls returning None -> check D0/m ranges are valid
+  4. All surrogate calls returning None -> check model parameters and ranges
 """
 
 import argparse
@@ -72,8 +68,19 @@ import numpy as np
 from multiprocessing import Pool, cpu_count
 
 from interp import LogInterp
-from helprop_runner import HelPropRunner
+from formula_lis import (
+    DEFAULT_SHEN_LIS_PARAMS,
+    DEFAULT_SHEN_LIS_RANGES,
+    SHEN_LIS_ALL_NAMES,
+)
 from surrogate_runner import CompositeSurrogateRunner, SurrogateRunner
+
+LIS_FORMULA_SENTINELS = {"formula", "shen", "shen2025"}
+
+
+def is_formula_lis(value):
+    """Return whether --lis selects Shen's analytic LIS rather than a file."""
+    return str(value).strip().lower() in LIS_FORMULA_SENTINELS
 
 # ---------- optional deps ----------
 try:
@@ -108,7 +115,6 @@ except ImportError:
 
 DEFAULT_PARAM_RANGES = {
     "D0": (0.1, 50.0),
-    "m": (-2.0, 2.0),
     "indexA": (0.5, 2.0),
     "indexB": (0.5, 2.0),
     "angle": (5.0, 30.0),
@@ -116,9 +122,9 @@ DEFAULT_PARAM_RANGES = {
     "hcs-osc-phase": (0.0, 360.0),
     "hcs-omega": (0.0, 4.0),
 }
+DEFAULT_PARAM_RANGES.update(DEFAULT_SHEN_LIS_RANGES)
 DEFAULT_PARAM_LABELS = {
     "D0": r"$D_0\;(10^{22}\,\mathrm{cm^2/s})$",
-    "m": r"$m_{\mathrm{corot}}$",
     "indexA": r"$a$",
     "indexB": r"$b$",
     "angle": r"$\alpha_{\mathrm{HCS}}$",
@@ -126,20 +132,22 @@ DEFAULT_PARAM_LABELS = {
     "hcs-osc-phase": r"$\phi_{\mathrm{HCS}}$",
     "hcs-omega": r"$\omega_{\mathrm{HCS}}/\Omega$",
 }
-NDIM = 2
-LABELS = [DEFAULT_PARAM_LABELS["D0"], DEFAULT_PARAM_LABELS["m"]]
-PARAM_NAMES = ("D0", "m")
+for _lis_name in DEFAULT_SHEN_LIS_RANGES:
+    DEFAULT_PARAM_LABELS[_lis_name] = rf"${_lis_name.replace('lis_', '')}$"
+NDIM = 1
+LABELS = [DEFAULT_PARAM_LABELS["D0"]]
+PARAM_NAMES = ("D0",)
 PARAM_RANGES = {
     "D0": DEFAULT_PARAM_RANGES["D0"],
-    "m": DEFAULT_PARAM_RANGES["m"],
 }
 
 
 class _LogPrior:
     """Picklable uniform log-prior over named parameter ranges."""
-    def __init__(self, param_names, param_ranges):
+    def __init__(self, param_names, param_ranges, ordered_lis_breaks=False):
         self.param_names = tuple(param_names)
         self.param_ranges = {name: tuple(param_ranges[name]) for name in self.param_names}
+        self.ordered_lis_breaks = bool(ordered_lis_breaks)
 
     def __call__(self, theta):
         values = np.asarray(theta, dtype=float)
@@ -150,6 +158,12 @@ class _LogPrior:
         for name, value in zip(self.param_names, values):
             low, high = self.param_ranges[name]
             if value < low or value > high:
+                return -np.inf
+        if (self.ordered_lis_breaks
+                and "lis_a2" in self.param_names
+                and "lis_a5" in self.param_names):
+            values_by_name = dict(zip(self.param_names, values))
+            if values_by_name["lis_a2"] >= values_by_name["lis_a5"]:
                 return -np.inf
         return 0.0
 
@@ -170,12 +184,14 @@ class _PriorTransform:
 
 class _LogLikelihood:
     """Picklable log-likelihood with internal result cache."""
-    def __init__(self, runner, E_obs, F_obs, err_obs, param_names):
+    def __init__(self, runner, E_obs, F_obs, err_obs, param_names,
+                 profile_lis_norm=False):
         self.runner = runner
         self.E_obs = E_obs
         self.F_obs = F_obs
         self.err_obs = err_obs
         self.param_names = tuple(param_names)
+        self.profile_lis_norm = bool(profile_lis_norm)
         self._cache = {}
 
     def __call__(self, theta):
@@ -202,8 +218,21 @@ class _LogLikelihood:
             self._cache[key] = -np.inf
             return -np.inf
 
+        if (np.any(self.F_obs <= 0.0) or np.any(self.err_obs <= 0.0)
+                or np.any(~np.isfinite(self.F_obs))
+                or np.any(~np.isfinite(self.err_obs))):
+            self._cache[key] = -np.inf
+            return -np.inf
         sigma = self.err_obs / self.F_obs
-        resid = (np.log(self.F_obs) - np.log(F_sim)) / sigma
+        delta = np.log(self.F_obs) - np.log(F_sim)
+        if self.profile_lis_norm:
+            # Shen's a0 is a pure multiplicative normalization.  For a
+            # Gaussian likelihood in log flux it can be eliminated exactly,
+            # leaving the seven requested shape parameters to MCMC.
+            weights = 1.0 / sigma ** 2
+            log_scale = np.sum(weights * delta) / np.sum(weights)
+            delta = delta - log_scale
+        resid = delta / sigma
         ll = -0.5 * np.sum(resid ** 2)
         self._cache[key] = ll
         return ll
@@ -227,16 +256,18 @@ class _TemperedProb:
         return lp + self._beta * self._ll(theta)
 
 
-def make_log_prior(param_names, param_ranges):
-    return _LogPrior(param_names, param_ranges)
+def make_log_prior(param_names, param_ranges, ordered_lis_breaks=False):
+    return _LogPrior(param_names, param_ranges, ordered_lis_breaks=ordered_lis_breaks)
 
 
 def make_prior_transform(param_names, param_ranges):
     return _PriorTransform(param_names, param_ranges)
 
 
-def make_log_likelihood(runner, E_obs, F_obs, err_obs, param_names):
-    return _LogLikelihood(runner, E_obs, F_obs, err_obs, param_names)
+def make_log_likelihood(runner, E_obs, F_obs, err_obs, param_names,
+                        profile_lis_norm=False):
+    return _LogLikelihood(runner, E_obs, F_obs, err_obs, param_names,
+                          profile_lis_norm=profile_lis_norm)
 
 
 def _parse_fixed_option_items(items):
@@ -490,15 +521,28 @@ def run_emcee_sampler(n_walkers, n_steps, ndim, log_likelihood, log_prior, p0,
 # ==================================================================
 
 def run_dynesty_sampler(log_likelihood, prior_transform_fn, ndim,
-                        nlive=500, dlogz=0.5, pool=None):
+                        nlive=500, dlogz=0.5, maxcall=None, pool=None):
+    if nlive < 50:
+        raise ValueError("dynesty nlive must be at least 50")
+    if not np.isfinite(dlogz) or dlogz <= 0.0:
+        raise ValueError("dynesty dlogz must be finite and positive")
+    if maxcall is not None and maxcall <= 0:
+        raise ValueError("dynesty maxcall must be positive when supplied")
+
     sampler = dynesty.DynamicNestedSampler(
         log_likelihood, prior_transform_fn, ndim=ndim,
         bound="multi",      # multi-ellipsoid  -> tracks multiple modes
         sample="rwalk",
         pool=pool,
     )
-    sampler.run_nested(nlive_init=nlive, dlogz_init=dlogz,
-                       print_progress=True)
+    run_kwargs = {
+        "nlive_init": nlive,
+        "dlogz_init": dlogz,
+        "print_progress": True,
+    }
+    if maxcall is not None:
+        run_kwargs["maxcall"] = maxcall
+    sampler.run_nested(**run_kwargs)
     return sampler
 
 
@@ -602,15 +646,29 @@ def main():
     global NDIM, LABELS, PARAM_NAMES, PARAM_RANGES
 
     ap = argparse.ArgumentParser(
-        description="MCMC Bayesian Analysis of HelProp modulation parameters",
+        description="MCMC Bayesian Analysis using a HelProp surrogate model",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     # I/O
-    ap.add_argument("--helprop", default="./HelProp",
-                    help="Path to HelProp executable")
     ap.add_argument("--lis", default="../LocalProton",
-                    help="LIS input spectrum file")
+                    help="LIS file path, or 'formula' for Shen et al. Eq. (5)")
+    for _lis_name in SHEN_LIS_ALL_NAMES:
+        _lis_index = _lis_name.rsplit("a", 1)[-1]
+        ap.add_argument(
+            f"--lis-a{_lis_index}", f"--lis_a{_lis_index}",
+            dest=_lis_name, type=float, default=None,
+            help=f"Fixed Shen LIS coefficient {_lis_name}; "
+                 "a sampled value overrides it",
+        )
+    ap.add_argument("--lis-bins", type=int, default=256,
+                    help="Number of logarithmic bins used to represent formula LIS")
+    ap.add_argument("--lis-min", type=float, default=1.0e-4,
+                    help="Minimum formula-LIS kinetic energy per nucleon (GeV)")
+    ap.add_argument("--lis-max", type=float, default=0.0,
+                    help="Maximum formula-LIS energy (GeV); 0 derives a broad range")
+    ap.add_argument("--no-profile-lis-normalization", action="store_true",
+                    help="Do not analytically profile Shen's a0 normalization")
     ap.add_argument("--obs", default="data/obs_data.dat",
                     help="Observed data file  (E  F  err)")
     ap.add_argument("-o", "--outdir", default="chains",
@@ -630,6 +688,26 @@ def main():
     ap.add_argument("--nburn",    type=int, default=500,
                     help="Burn-in steps to discard")
 
+    # dynesty-specific precision controls
+    ap.add_argument(
+        "--dynesty-nlive",
+        type=int,
+        default=1000,
+        help="Initial dynesty live-point count; larger improves posterior resolution",
+    )
+    ap.add_argument(
+        "--dynesty-dlogz",
+        type=float,
+        default=0.01,
+        help="Dynesty initial log-evidence stopping tolerance; smaller is more precise",
+    )
+    ap.add_argument(
+        "--dynesty-maxcall",
+        type=int,
+        default=0,
+        help="Maximum dynesty likelihood calls; 0 means unlimited",
+    )
+
     # PT-specific
     ap.add_argument("--ntemps",       type=int,   default=10,
                     help="Number of temperature levels (pt)")
@@ -638,7 +716,7 @@ def main():
     ap.add_argument("--swap-interval", type=int,   default=5,
                     help="Steps between swap proposals (pt)")
 
-    # HelProp physics parameters (fixed across MCMC)
+    # Forward-model parameters (fixed unless learned by the surrogate)
     ap.add_argument("--A",         type=int, default=1,
                     help="Nucleon number A")
     ap.add_argument("--Z",         type=int, default=1,
@@ -662,24 +740,12 @@ def main():
     ap.add_argument("--indexB",    type=float, default=1.0,
                     help="Diffusion index b")
 
-    # HelProp simulation parameters
-    ap.add_argument("--nparticles", type=int, default=200,
-                    help="HelProp --number  (particles per energy bin)")
-    ap.add_argument("--nthread",    type=int, default=4,
-                    help="HelProp --nthread")
-    ap.add_argument("--hcs-table",  default="",
-                    help="Path to precomputed HCS distance table")
-    ap.add_argument("--extra-opts", nargs="*", default=[],
-                    help="Any additional HelProp flags")
     ap.add_argument("--no-cache", action="store_true",
-                    help="Disable HelProp result caching in the runner")
+                    help="Disable surrogate result caching in the runner")
     ap.add_argument("--verbose", action="store_true",
-                    help="Show HelProp command and stderr output")
-    ap.add_argument("--backend", choices=["helprop", "surrogate"],
-                    default="helprop",
-                    help="Forward model backend for likelihood calls")
+                    help="Show surrogate diagnostic output")
     ap.add_argument("--surrogate-model", default="",
-                    help="Saved helprop_surrogate model for --backend surrogate")
+                    help="Saved helprop_surrogate model")
     ap.add_argument("--surrogate-low-model", default="",
                     help="Low-energy saved surrogate model for dual-kernel surrogate mode")
     ap.add_argument("--surrogate-high-model", default="",
@@ -719,10 +785,22 @@ def main():
     # prior ranges
     ap.add_argument("--D0-range", type=float, nargs=2,
                     default=list(DEFAULT_PARAM_RANGES["D0"]), help="D0 prior bounds")
-    ap.add_argument("--m-range",  type=float, nargs=2,
-                    default=list(DEFAULT_PARAM_RANGES["m"]),  help="m_corot prior bounds")
 
     args = ap.parse_args()
+
+    formula_lis = is_formula_lis(args.lis)
+    if not formula_lis and not os.path.isfile(args.lis):
+        sys.exit(f"ERROR: LIS file not found: {args.lis}")
+    if formula_lis:
+        if args.lis_bins < 2:
+            sys.exit("ERROR: --lis-bins must be at least 2")
+        if args.lis_min <= 0.0:
+            sys.exit("ERROR: --lis-min must be positive")
+        if args.lis_max < 0.0:
+            sys.exit("ERROR: --lis-max must be positive or zero")
+        if (args.lis_a0 is not None
+                and args.lis_a0 <= 0.0):
+            sys.exit("ERROR: --lis-a0 must be positive")
 
     # dependency checks
     if args.sampler in ("pt", "emcee") and not HAS_EMCEE:
@@ -748,70 +826,84 @@ def main():
 
     explicit_ranges = _parse_range_option_items(args.sample_range)
 
-    if args.backend == "surrogate":
-        dual_surrogate = bool(args.surrogate_low_model or args.surrogate_high_model)
-        if dual_surrogate and not (args.surrogate_low_model and args.surrogate_high_model):
-            sys.exit("ERROR: both --surrogate-low-model and --surrogate-high-model are required for dual-kernel surrogate mode")
-        if not dual_surrogate and not args.surrogate_model:
-            sys.exit("ERROR: --surrogate-model is required with --backend surrogate")
-        surrogate_options = {
-            "B0": args.B0,
-            "angle": args.angle,
-            "hcs-osc-amp": args.hcs_osc_amp,
-            "hcs-osc-phase": args.hcs_osc_phase,
-            "hcs-omega": args.hcs_omega,
-            "indexA": args.indexA,
-            "indexB": args.indexB,
-        }
-        surrogate_options.update(_parse_fixed_option_items(args.surrogate_param))
-        if dual_surrogate:
-            runner = CompositeSurrogateRunner(
-                args.surrogate_low_model,
-                args.surrogate_high_model,
-                args.lis,
-                split_energy=args.surrogate_split_energy,
-                blend_dex=args.surrogate_blend_dex,
-                fixed_options=surrogate_options,
-                verbose=args.verbose,
-            )
-        else:
-            runner = SurrogateRunner(args.surrogate_model, args.lis,
-                                     fixed_options=surrogate_options,
-                                     verbose=args.verbose)
-        inferred_names = tuple(runner.learned_parameters())
+    dual_surrogate = bool(args.surrogate_low_model or args.surrogate_high_model)
+    if dual_surrogate and not (args.surrogate_low_model and args.surrogate_high_model):
+        sys.exit("ERROR: both --surrogate-low-model and --surrogate-high-model are required for dual-kernel surrogate mode")
+    if not dual_surrogate and not args.surrogate_model:
+        sys.exit("ERROR: --surrogate-model is required")
+    surrogate_options = {
+        "A": args.A,
+        "Z": args.Z,
+        "m": 0.0,
+        "B0": args.B0,
+        "polarity": args.polarity,
+        "angle": args.angle,
+        "R0": args.R0,
+        "hcs-osc-amp": args.hcs_osc_amp,
+        "hcs-osc-phase": args.hcs_osc_phase,
+        "hcs-omega": args.hcs_omega,
+        "indexA": args.indexA,
+        "indexB": args.indexB,
+    }
+    surrogate_options.update(_parse_fixed_option_items(args.surrogate_param))
+    if "m" in surrogate_options and surrogate_options["m"] != 0.0:
+        sys.exit("ERROR: m/m0 is permanently fixed to 0")
+    surrogate_options["m"] = 0.0
+    formula_lis_max = (
+        args.lis_max if args.lis_max > 0.0
+        else max(100.0, 100.0 * E_obs.max())
+    )
+    if formula_lis and formula_lis_max <= args.lis_min:
+        sys.exit("ERROR: formula LIS maximum must exceed --lis-min")
+    fixed_lis_params = {
+        name: value
+        for name in SHEN_LIS_ALL_NAMES
+        if (value := getattr(args, name)) is not None
+    }
+    lis_a0 = fixed_lis_params.get(
+        "lis_a0", DEFAULT_SHEN_LIS_PARAMS["lis_a0"]
+    )
+    surrogate_kwargs = {
+        "fixed_options": surrogate_options,
+        "verbose": args.verbose,
+        "formula_lis": formula_lis,
+        "lis_min": args.lis_min,
+        "lis_max": formula_lis_max,
+        "lis_bins": args.lis_bins,
+        "lis_a0": lis_a0,
+        "lis_params": fixed_lis_params,
+    }
+    if dual_surrogate:
+        runner = CompositeSurrogateRunner(
+            args.surrogate_low_model,
+            args.surrogate_high_model,
+            args.lis,
+            split_energy=args.surrogate_split_energy,
+            blend_dex=args.surrogate_blend_dex,
+            **surrogate_kwargs,
+        )
     else:
+        runner = SurrogateRunner(args.surrogate_model, args.lis,
+                                 **surrogate_kwargs)
+    inferred_names = tuple(runner.learned_parameters())
+    inferred_names = tuple(name for name in inferred_names if name != "m")
+    if formula_lis:
+        inferred_names += tuple(
+            name for name in SHEN_LIS_ALL_NAMES
+            if name not in inferred_names
+        )
         # set up runner — fixed physics + simulation options
-        common_opts = [
-            f"--A={args.A}", f"--Z={args.Z}",
-            f"--B0={args.B0}", f"--polarity={args.polarity}",
-            f"--angle={args.angle}", f"--R0={args.R0}",
-            f"--hcs-osc-amp={args.hcs_osc_amp}",
-            f"--hcs-osc-phase={args.hcs_osc_phase}",
-            f"--hcs-omega={args.hcs_omega}",
-            f"--indexA={args.indexA}", f"--indexB={args.indexB}",
-            f"--number={args.nparticles}",
-            f"--nthread={args.nthread}",
-            f"--iotype=TXT",
-        ]
-        if args.hcs_table:
-            common_opts.append(f"--hcs-table={args.hcs_table}")
-        common_opts.extend(args.extra_opts)
-        runner = HelPropRunner(args.helprop, args.lis, common_opts,
-                               verbose=args.verbose, timeout=600,
-                               use_cache=not args.no_cache)
-        inferred_names = ("D0", "m")
 
     param_names = tuple(args.sample_param) if args.sample_param else inferred_names
     if not param_names:
         sys.exit("ERROR: no sampled parameters were selected")
-    if args.backend == "helprop" and param_names != ("D0", "m"):
-        sys.exit("ERROR: --backend helprop currently supports sampling only D0 and m")
+    if "m" in param_names:
+        sys.exit("ERROR: m/m0 is permanently fixed to 0 and cannot be sampled")
     repeated_params = [name for name in param_names if param_names.count(name) > 1]
     if repeated_params:
         sys.exit(f"ERROR: duplicate sampled parameters: {', '.join(sorted(set(repeated_params)))}")
     param_ranges = _default_ranges_for(param_names)
     param_ranges["D0"] = tuple(args.D0_range)
-    param_ranges["m"] = tuple(args.m_range)
     param_ranges.update(explicit_ranges)
     missing_ranges = [name for name in param_names if name not in param_ranges]
     if missing_ranges:
@@ -830,9 +922,23 @@ def main():
         low, high = param_ranges[name]
         print(f"    {name}: [{low:g}, {high:g}]")
 
-    log_prior = make_log_prior(param_names, param_ranges)
+    log_prior = make_log_prior(
+        param_names, param_ranges,
+        ordered_lis_breaks=formula_lis,
+    )
     prior_transform = make_prior_transform(param_names, param_ranges)
-    log_likelihood = make_log_likelihood(runner, E_obs, F_obs, err_obs, param_names)
+    profile_lis_norm = (
+        formula_lis
+        and "lis_a0" not in param_names
+        and "lis_a0" not in fixed_lis_params
+        and not args.no_profile_lis_normalization
+    )
+    if profile_lis_norm:
+        print("  Shen LIS a0: analytically profiled in log-flux likelihood")
+    log_likelihood = make_log_likelihood(
+        runner, E_obs, F_obs, err_obs, param_names,
+        profile_lis_norm=profile_lis_norm,
+    )
 
     np.random.seed(args.seed)
     os.makedirs(args.outdir, exist_ok=True)
@@ -895,6 +1001,13 @@ def main():
 
         elif args.sampler == "dynesty":
             sampler = run_dynesty_sampler(log_likelihood, prior_transform, NDIM,
+                                          nlive=args.dynesty_nlive,
+                                          dlogz=args.dynesty_dlogz,
+                                          maxcall=(
+                                              None
+                                              if args.dynesty_maxcall == 0
+                                              else args.dynesty_maxcall
+                                          ),
                                           pool=pool)
             from dynesty import utils as dyfunc
             weights = np.exp(sampler.results.logwt - sampler.results.logz[-1])

@@ -187,7 +187,7 @@ KDInterp* hcs_interp(const HCS& hcs, bool pflag) {
     double r = x[0],
            theta = x[1],
            phi0 = x[2];
-    double phi = phi0 - r * hcs.Omega / hcs.Vs_eq;
+    double phi = hcs.phi_from_phi0(r, phi0);
 
     double res = hcs.get_distance(r, theta, phi, p_cs);
     p_cs_tab.insert(pair<vec_t, Vec>(x, p_cs));
@@ -202,7 +202,7 @@ KDInterp* hcs_interp(const HCS& hcs, bool pflag) {
     double r = x[0],
            theta = x[1],
            phi0 = x[2];
-    double phi = phi0 - r * hcs.Omega / hcs.Vs_eq;
+    double phi = hcs.phi_from_phi0(r, phi0);
     Vec target;
     target.set_spherical(r, theta, phi);
     double res = hcs.sign(r, theta, phi) * hcs.get_distance_from_point(target, point);
@@ -253,8 +253,7 @@ double sum(const vec_t& vec) {
   return res;
 }
 double hcs_interp_eval(double r, double theta, double phi, KDInterp *intp, const HCS& hcs, bool pflag) {
-  double phi0 = phi + r * hcs.Omega / hcs.Vs_eq;
-  phi0 = fmod(phi0, 2 * pi);
+  double phi0 = hcs.phi0_mod(r, phi);
   vector<double> x = {r, theta, phi0};
   return (*intp)(x);
 }
@@ -268,7 +267,7 @@ void get_r_theta_phi(const vector<double>& x, double& r, double& theta, double& 
   r = x[1];
   theta = pi / 2 + x[2] * HCS::angle;
   double phi0 = x[3];
-  phi = phi0 - r * hcs.Omega / hcs.Vs_eq;
+  phi = hcs.phi_from_phi0(r, phi0);
 }
 void print_block_d4(const KDValueSide* kd) {
   particle p;
@@ -413,8 +412,7 @@ KDInterp* hcs_interp(double angle_low, double angle_up, double resolution, int i
 }
 
 double hcs_interp_eval(double angle, double r, double theta, double phi, KDInterp *intp, const HCS& hcs, bool pflag) {
-  double phi0 = phi + r * hcs.Omega / hcs.Vs_eq;
-  phi0 = fmod(phi0, 2 * pi);
+  double phi0 = hcs.phi0_mod(r, phi);
 
   double theta_rel = (theta - pi / 2) / angle;
   vector<double> x = {angle, r, theta_rel, phi0};

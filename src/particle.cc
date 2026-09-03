@@ -18,7 +18,7 @@ const double particle::mp = 0.93827 * GeV;
 const double particle::me = 5.10998e-4* GeV;
 particle::particle() :
   A(1), Z(1),
-  polarity(-1), B0(5 * nT), indexA(2), indexB(1), D0(5 * 1e22 * cm * cm / sec), rigidity0(1 * GeV / e), rk(3 * GeV / e / rigidity0),
+  polarity(-1), B0(5 * nT), indexA(1), indexB(1), D0(5 * 1e22 * cm * cm / sec), rigidity0(1 * GeV / e), rk(3 * GeV / e / rigidity0),
   A_drift(1), m_corot(0),
   Bn(B0 * AU * AU / 1.35883),
   r(AU), theta(90*deg + 1e-10), phi(1e-10), hcs(Wind(r, theta, phi, HCS::angle), "")

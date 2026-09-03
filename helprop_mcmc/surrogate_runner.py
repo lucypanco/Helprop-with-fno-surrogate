@@ -9,6 +9,11 @@ from collections.abc import Mapping
 import numpy as np
 
 from interp import LogInterp
+from formula_lis import (
+    DEFAULT_SHEN_LIS_PARAMS,
+    SHEN_LIS_ALL_NAMES,
+    shen_lis_flux,
+)
 
 
 def _ensure_repo_root_on_path():
@@ -29,6 +34,53 @@ def _load_lis(lis_input):
     if np.any(np.diff(lis_energy) <= 0.0):
         raise ValueError("LIS energies must be strictly increasing")
     return lis_path, lis_energy, lis_flux
+
+
+class _LISSource:
+    """Fixed-file or analytic Shen LIS source for surrogate folding."""
+
+    def __init__(self, lis_input, formula_lis=False, lis_min=1.0e-4,
+                 lis_max=1000.0, lis_bins=256, lis_a0=1.0,
+                 lis_params=None):
+        self.formula = bool(formula_lis)
+        if self.formula:
+            if lis_min <= 0.0 or lis_max <= lis_min or lis_bins < 2:
+                raise ValueError("invalid formula LIS grid")
+            self.path = "<shen-formula>"
+            self.energy = np.geomspace(lis_min, lis_max, int(lis_bins))
+            self.fixed_params = dict(DEFAULT_SHEN_LIS_PARAMS)
+            self.fixed_params["lis_a0"] = float(lis_a0)
+            if lis_params:
+                self.fixed_params.update(
+                    (name, float(value))
+                    for name, value in lis_params.items()
+                    if name in SHEN_LIS_ALL_NAMES
+                )
+            self.flux = shen_lis_flux(self.energy, self.fixed_params)
+        else:
+            self.path, self.energy, self.flux = _load_lis(lis_input)
+            self.fixed_params = None
+
+    def cache_key(self, theta_options):
+        if not self.formula:
+            return ()
+        params = dict(self.fixed_params)
+        for name in SHEN_LIS_ALL_NAMES:
+            if name in theta_options:
+                params[name] = theta_options[name]
+        return tuple((name, round(float(params[name]), 8))
+                     for name in SHEN_LIS_ALL_NAMES)
+
+    def interpolate(self, target_energy, theta_options):
+        if not self.formula:
+            flux = self.flux
+        else:
+            params = dict(self.fixed_params)
+            for name in SHEN_LIS_ALL_NAMES:
+                if name in theta_options:
+                    params[name] = theta_options[name]
+            flux = shen_lis_flux(self.energy, params)
+        return _interpolate_lis_flux(self.energy, flux, target_energy)
 
 
 def _resolve_grid(model, name, fallback_grid):
@@ -78,8 +130,9 @@ def _options_for_model(model, fixed_options, D0=None, m_corot=None, theta_option
         )
     if D0 is not None and "D0" in model.learned:
         options["D0"] = D0
-    if m_corot is not None and "m" in model.learned:
-        options["m"] = m_corot
+    # Co-rotation is permanently disabled for this MCMC workflow.
+    if "m" in model.learned:
+        options["m"] = 0.0
     return options
 
 
@@ -98,13 +151,22 @@ def _cache_key(model, options):
 class SurrogateRunner:
     """Return modulated spectra from a saved HelProp surrogate model."""
 
-    def __init__(self, model_path, lis_input, fixed_options=None, verbose=False):
+    def __init__(self, model_path, lis_input, fixed_options=None, verbose=False,
+                 formula_lis=False, lis_min=1.0e-4, lis_max=1000.0,
+                 lis_bins=256, lis_a0=1.0, lis_params=None):
         _ensure_repo_root_on_path()
 
         from helprop_surrogate.model import load_model
 
         self.model = load_model(model_path)
-        self.lis_input, self._lis_energy, self._lis_flux = _load_lis(lis_input)
+        self.lis_source = _LISSource(
+            lis_input, formula_lis=formula_lis, lis_min=lis_min,
+            lis_max=lis_max, lis_bins=lis_bins, lis_a0=lis_a0,
+            lis_params=lis_params,
+        )
+        self.lis_input = self.lis_source.path
+        self._lis_energy = self.lis_source.energy
+        self._lis_flux = self.lis_source.flux
         self.fixed_options = dict(fixed_options or {})
         self.verbose = verbose
         self._cache = {}
@@ -126,7 +188,8 @@ class SurrogateRunner:
                 positional_m,
                 theta_options=theta_options,
             )
-            key = _cache_key(self.model, options)
+            key = (_cache_key(self.model, options),
+                   self.lis_source.cache_key(theta_options or {}))
         except Exception as exc:
             if self.verbose:
                 print(f"  Surrogate options failed: {exc}")
@@ -140,7 +203,7 @@ class SurrogateRunner:
         try:
             etoa = self._resolve_grid("etoa")
             elis = self._resolve_grid("elis")
-            lis_flux = self._interpolate_lis(elis)
+            lis_flux = self._interpolate_lis(elis, theta_options or {})
             flux = self.model.predict_spectrum(options, lis_flux, etoa, elis)
             if np.any(~np.isfinite(flux)) or np.any(flux <= 0.0):
                 return None
@@ -164,8 +227,8 @@ class SurrogateRunner:
     def _resolve_grid(self, name):
         return _resolve_grid(self.model, name, self._lis_energy)
 
-    def _interpolate_lis(self, elis_grid):
-        return _interpolate_lis_flux(self._lis_energy, self._lis_flux, elis_grid)
+    def _interpolate_lis(self, elis_grid, theta_options=None):
+        return self.lis_source.interpolate(elis_grid, theta_options or {})
 
 
 class CompositeSurrogateRunner:
@@ -180,6 +243,12 @@ class CompositeSurrogateRunner:
         blend_dex=0.2,
         fixed_options=None,
         verbose=False,
+        formula_lis=False,
+        lis_min=1.0e-4,
+        lis_max=1000.0,
+        lis_bins=256,
+        lis_a0=1.0,
+        lis_params=None,
     ):
         _ensure_repo_root_on_path()
 
@@ -187,7 +256,14 @@ class CompositeSurrogateRunner:
 
         self.low_model = load_model(low_model_path)
         self.high_model = load_model(high_model_path)
-        self.lis_input, self._lis_energy, self._lis_flux = _load_lis(lis_input)
+        self.lis_source = _LISSource(
+            lis_input, formula_lis=formula_lis, lis_min=lis_min,
+            lis_max=lis_max, lis_bins=lis_bins, lis_a0=lis_a0,
+            lis_params=lis_params,
+        )
+        self.lis_input = self.lis_source.path
+        self._lis_energy = self.lis_source.energy
+        self._lis_flux = self.lis_source.flux
         self.split_energy = float(split_energy)
         self.blend_dex = float(blend_dex)
         self.fixed_options = dict(fixed_options or {})
@@ -229,6 +305,7 @@ class CompositeSurrogateRunner:
             key = (
                 ("low", _cache_key(self.low_model, low_options)),
                 ("high", _cache_key(self.high_model, high_options)),
+                ("lis", self.lis_source.cache_key(theta_options or {})),
             )
         except Exception as exc:
             if self.verbose:
@@ -241,8 +318,12 @@ class CompositeSurrogateRunner:
 
         self._call_count += 1
         try:
-            low_etoa, low_flux = self._predict_model(self.low_model, low_options)
-            high_etoa, high_flux = self._predict_model(self.high_model, high_options)
+            low_etoa, low_flux = self._predict_model(
+                self.low_model, low_options, theta_options or {}
+            )
+            high_etoa, high_flux = self._predict_model(
+                self.high_model, high_options, theta_options or {}
+            )
             etoa, flux = self._splice(low_etoa, low_flux, high_etoa, high_flux)
             if np.any(~np.isfinite(flux)) or np.any(flux <= 0.0):
                 return None
@@ -263,10 +344,10 @@ class CompositeSurrogateRunner:
             "hit_rate": self._cache_hits / max(total, 1),
         }
 
-    def _predict_model(self, model, options):
+    def _predict_model(self, model, options, theta_options):
         etoa = _resolve_grid(model, "etoa", self._lis_energy)
         elis = _resolve_grid(model, "elis", self._lis_energy)
-        lis_flux = _interpolate_lis_flux(self._lis_energy, self._lis_flux, elis)
+        lis_flux = self.lis_source.interpolate(elis, theta_options)
         flux = model.predict_spectrum(options, lis_flux, etoa, elis)
         if np.any(~np.isfinite(flux)) or np.any(flux <= 0.0):
             raise ValueError("model returned non-positive or non-finite flux")

@@ -5,6 +5,7 @@
 #include "Unit.h"
 #include "hcs_interp.h"
 #include <bitset>
+#include <cmath>
 #include <cstring>
 
 enum Polygon { Dodecahedron, Icosahedron, pseudorandom };
@@ -54,7 +55,24 @@ class HCS {
     Vec norm_vec(const Vec& p_cs) const;
 
     inline double phi0(double r, double phi) const {
-      return phi + r * Omega / Vs_eq - Omega * (t - t0);
+      return phi + r * Omega / Vs_eq;
+    }
+
+    inline double phi0_mod(double r, double phi) const {
+      return wrap_2pi(phi0(r, phi));
+    }
+
+    inline double phi_from_phi0(double r, double phi0_) const {
+      return phi0_ - r * Omega / Vs_eq;
+    }
+
+    inline double r_from_phi0(double phi0_, double phi) const {
+      return (phi0_ - phi) * Vs_eq / Omega;
+    }
+
+    static double wrap_2pi(double phi) {
+      double res = std::fmod(phi, 2 * Unit::pi);
+      return res < 0 ? res + 2 * Unit::pi : res;
     }
 
     void rphi(const double &r, const double &phi, double& x, double& y, double& z) const;

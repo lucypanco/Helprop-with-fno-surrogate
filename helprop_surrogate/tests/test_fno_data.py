@@ -1,6 +1,9 @@
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -15,6 +18,7 @@ from helprop_surrogate.matrix_data import (
     run_helprop_matrices,
     split_indices,
     write_split_files,
+    main,
 )
 
 
@@ -80,6 +84,14 @@ class FNODataTest(unittest.TestCase):
             self.assertTrue((Path(tmpdir) / "val_indices.txt").exists())
             self.assertTrue((Path(tmpdir) / "test_indices.txt").exists())
 
+    def test_zero_validation_fraction_disables_validation_split(self):
+        train, val, test = split_indices(20, train_fraction=0.9, val_fraction=0.0, seed=4)
+
+        self.assertEqual(train.size, 18)
+        self.assertEqual(val.size, 0)
+        self.assertEqual(test.size, 2)
+        self.assertEqual(np.unique(np.concatenate([train, test])).size, 20)
+
     def test_matrix_command_uses_bson_matrix_mode(self):
         cmd = build_helprop_matrix_command(
             helprop="./HelProp",
@@ -143,6 +155,64 @@ class FNODataTest(unittest.TestCase):
     def test_parallel_runner_rejects_invalid_jobs_before_execution(self):
         with self.assertRaisesRegex(ValueError, "jobs"):
             run_helprop_matrices([], jobs=0, dry_run=True)
+
+    def test_continue_uses_saved_config_and_skips_completed_matrix(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            run_dir = root / "fno_runs" / "run_0001"
+            data_dir = run_dir / "data"
+            data_dir.mkdir(parents=True)
+            design = [{"D0": 1.0, "m": 0.0}, {"D0": 2.0, "m": 0.1}]
+            runs = make_matrix_runs(
+                helprop="HelProp",
+                outdir=data_dir,
+                design=design,
+                etoa="1,2,3",
+                elis="1,2,3",
+                number=10,
+                nthread=1,
+            )
+            runs[0].output.write_bytes(b"completed")
+            config = {
+                "helprop": "HelProp",
+                "run_dir": str(run_dir),
+                "learned": ["D0", "m"],
+                "fixed": {},
+                "ranges": {"D0": [1.0, 2.0], "m": [0.0, 0.1]},
+                "choices": {},
+                "etoa": "1,2,3",
+                "elis": "1,2,3",
+                "number": 10,
+                "nthread": 1,
+                "jobs": 1,
+                "n_runs": 2,
+                "seed": 123,
+                "train_fraction": 0.7,
+                "val_fraction": 0.15,
+                "sample": False,
+                "integer_params": [],
+                "timeout": None,
+            }
+            (run_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+            old_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                dataset = make_matrix_dataset(2)
+                with mock.patch(
+                    "helprop_surrogate.matrix_data.run_helprop_matrices"
+                ) as runner, mock.patch(
+                    "helprop_surrogate.matrix_data.consolidate_bson_matrices",
+                    return_value=dataset,
+                ):
+                    result = main(["--continue", str(run_dir)])
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(result, 0)
+        pending = runner.call_args.args[0]
+        self.assertEqual([run.index for run in pending], [1])
+        self.assertEqual(runner.call_args.kwargs["jobs"], 1)
+        self.assertFalse((run_dir / "continue.json").exists())
 
 
 if __name__ == "__main__":

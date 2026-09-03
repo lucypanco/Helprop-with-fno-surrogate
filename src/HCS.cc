@@ -1,6 +1,7 @@
 #include <fstream>
 #include <vector>
 #include <map>
+#include <algorithm>
 #include <iomanip>
 #include <cassert>
 #include <iomanip>
@@ -170,7 +171,7 @@ void HCS::rphi(const double &r, const double &phi, double& x, double& y, double&
 void HCS::r_bound(double r, double phi, double phi0, double& rlow, double& rup) const {
   double Tr = 2 * pi * Vs_eq / Omega;
 
-  rlow = (phi0 - phi + Omega * (t - t0)) * Vs_eq / Omega;
+  rlow = r_from_phi0(phi0, phi);
   rlow += floor((r - rlow) / Tr) * Tr;
   rup = rlow + Tr;
 }
@@ -264,11 +265,16 @@ class SpiralVdot {
   const Vec p_cs0, target_point;
   const double r_cs0, phi_cs0;
   double ov, theta_cs, phi0, ctheta, stheta;
+  const HCS* h;
   bool pflag = false;
-  SpiralVdot(double ov_, const Vec& p_cs, const Vec& target_point_) :
+  SpiralVdot(double ov_, const Vec& p_cs, const Vec& target_point_, const HCS* h_) :
     p_cs0(p_cs), target_point(target_point_),
     r_cs0(p_cs.len()), phi_cs0(p_cs.phi()),
-    ov(ov_), theta_cs(p_cs.theta()), phi0(phi_cs0 + r_cs0 * ov), ctheta(p_cs.z / r_cs0), stheta(sqrt(1 - ctheta * ctheta)) {}
+    ov(ov_), theta_cs(p_cs.theta()), phi0(h_->phi0(r_cs0, phi_cs0)), ctheta(p_cs.z / r_cs0), stheta(sqrt(1 - ctheta * ctheta)), h(h_) {}
+
+  double phi_at(double r) const {
+    return h->phi_from_phi0(fabs(r), phi0);
+  }
 
   Vec tangent_vec(double r, const Vec& point) const {
     double rphi = fabs(r) * stheta;
@@ -292,8 +298,7 @@ class SpiralVdot {
     Vec p_cs;
     if (r == r_cs0) p_cs = p_cs0;
     else {
-      double phi = phi0 - fabs(r * ov);
-      p_cs.set_spherical(r, theta_cs, phi);
+      p_cs.set_spherical(r, theta_cs, phi_at(r));
     }
 
     Vec dl = target_point - p_cs;
@@ -308,27 +313,28 @@ class SpiralVdot {
 bool HCS::spiral_iterate(const Vec& target_point, Vec& p_cs, double& diter) const {
   double ov = Omega / Vs_eq;
 
-  SpiralVdot vdot(ov, p_cs, target_point);
+  SpiralVdot vdot(ov, p_cs, target_point, this);
 
   double vdot0 = vdot(vdot.r_cs0);
   if (vdot0 == 0) return false;
 
   double r1;
-  double dangle = - asin(vdot0) * fmin(diter / vdot.r_cs0, 1); // the dangle should be smaller when the distance is much small than r_cs
+  // Normalization roundoff can move this cosine a few ulps outside [-1, 1].
+  double dangle = - asin(std::clamp(vdot0, -1.0, 1.0)) * fmin(diter / vdot.r_cs0, 1); // the dangle should be smaller when the distance is much small than r_cs
 
   if (fabs(dangle) > 5 * deg) dangle = dangle > 0 ? 5 * deg : - 5 * deg; // Avoid the dangle too large
 
   int id = 0;
   do {
     id++;
-    r1 = (vdot.phi0 - vdot.phi_cs0 - id * dangle) / ov;
+    r1 = r_from_phi0(vdot.phi0, vdot.phi_cs0 + id * dangle);
   } while (vdot(r1) * vdot0 > 0);
 
   if (fabs(r1 - vdot.r_cs0) / vdot.r_cs0 < 1e-9) return false;
 
   double rh = ridders_method(vdot, vdot.r_cs0, r1, 1e-3);
 
-  p_cs.set_spherical(rh, vdot.theta_cs, vdot.phi0 -  fabs(rh * ov));
+  p_cs.set_spherical(rh, vdot.theta_cs, vdot.phi_at(rh));
 
   double diter_next = (target_point - p_cs).len();
 //  if (diter_next > diter) {
@@ -345,11 +351,11 @@ bool HCS::spiral_iterate(const Vec& target_point, Vec& p_cs, double& diter) cons
 //    cout << "r0 rh r1:         " << vdot.r_cs0 / AU << " " << rh / AU << " " << r1 / AU << endl;
 //    cout << "vdots:            " << vdot0 << " " << vdot(rh) << " " << vdot(r1) << endl;
 //
-//    p_cs.set_spherical(vdot.r_cs0, vdot.theta_cs, vdot.phi0 -  fabs(vdot.r_cs0 * ov));
+//    p_cs.set_spherical(vdot.r_cs0, vdot.theta_cs, vdot.phi_at(vdot.r_cs0));
 //    cout << "dist: r0 r1 rh    " << (target_point - p_cs).len() / AU;
-//    p_cs.set_spherical(r1, vdot.theta_cs, vdot.phi0 -  fabs(r1 * ov));
+//    p_cs.set_spherical(r1, vdot.theta_cs, vdot.phi_at(r1));
 //    cout << " " << (target_point - p_cs).len() / AU;
-//    p_cs.set_spherical(rh, vdot.theta_cs, vdot.phi0 -  fabs(rh * ov));
+//    p_cs.set_spherical(rh, vdot.theta_cs, vdot.phi_at(rh));
 //    cout << " " << (target_point - p_cs).len() / AU << endl;
 //
 //    //double rhh = ridders_method(vdot, vdot.r_cs0, rh, 1e-3);
@@ -399,7 +405,7 @@ class WaveVdot {
      * Kota_Jokipii:    ~ - tan(angle) * cos(phi + ov * r) * cos(pi / 2 - theta)^2 * ov * dtheta + dphi
      ************************************************************/
 
-    double phi0 = phi_cs + fabs(r * ov);
+    double phi0 = h->phi0(fabs(r), phi_cs);
 
     Vec dv;
     if (HCS::hcsform == HCS::Jokipii_Thomas) dv = - sin(angle) * cos(phi0) / stheta * ov * dtheta + dr;
@@ -531,8 +537,9 @@ Vec HCS::norm_vec(const Vec& p_cs) const {
    * Kota_Jokipii:    ~ - tan(angle) * cos(phi + ov * r) * cos(pi / 2 - theta)^2 * dtheta + dphi
    ************************************************************/
   Vec dtheta_phi;
-  if (hcsform == Jokipii_Thomas) dtheta_phi = - sin(angle) * cos(phi0(r_cs, phi_cs)) / stheta * dtheta + dphi;
-  else if (hcsform == Kota_Jokipii) dtheta_phi = - tan(angle) * cos(phi0(r_cs, phi_cs)) * stheta * stheta * dtheta + dphi;
+  const double phi0_cs = phi0(r_cs, phi_cs);
+  if (hcsform == Jokipii_Thomas) dtheta_phi = - sin(angle) * cos(phi0_cs) / stheta * dtheta + dphi;
+  else if (hcsform == Kota_Jokipii) dtheta_phi = - tan(angle) * cos(phi0_cs) * stheta * stheta * dtheta + dphi;
   else assert(false && "Unsuported hcsform");
 
   Vec dh = dr_phi.cross(dtheta_phi);

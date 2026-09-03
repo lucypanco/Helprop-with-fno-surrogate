@@ -30,7 +30,6 @@ DEFAULT_MATRIX_PARAM_RANGES = {
     "m": (-2.0, 2.0),
 }
 
-
 @dataclass(frozen=True)
 class MatrixDataset:
     """Full HelProp transfer matrices indexed by parameter point."""
@@ -268,26 +267,36 @@ def split_indices(
     val_fraction: float = 0.15,
     seed: int = 123,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return train/validation/test indices split by complete matrix sample."""
+    """Return train/validation/test indices split by complete matrix sample.
+
+    A zero validation or test fraction disables that split.  The training
+    fraction must remain positive, and the fractions must not exceed one in
+    total.
+    """
     if n_samples <= 0:
         raise ValueError("n_samples must be positive")
-    if not 0.0 < train_fraction < 1.0:
-        raise ValueError("train_fraction must be between 0 and 1")
-    if not 0.0 <= val_fraction < 1.0:
-        raise ValueError("val_fraction must be between 0 and 1")
-    if train_fraction + val_fraction >= 1.0:
-        raise ValueError("train_fraction + val_fraction must be less than 1")
+    fractions = np.asarray(
+        [train_fraction, val_fraction, 1.0 - train_fraction - val_fraction],
+        dtype=float,
+    )
+    if np.any(~np.isfinite(fractions)):
+        raise ValueError("split fractions must be finite")
+    if train_fraction <= 0.0:
+        raise ValueError("train_fraction must be positive")
+    if val_fraction < 0.0 or fractions[2] < 0.0:
+        raise ValueError("validation and test fractions must not be negative")
 
     rng = np.random.default_rng(seed)
     indices = rng.permutation(n_samples)
-    n_train = int(np.floor(n_samples * train_fraction))
-    n_val = int(np.floor(n_samples * val_fraction))
-    if n_samples >= 3:
-        n_train = max(1, min(n_train, n_samples - 2))
-        n_val = max(1, min(n_val, n_samples - n_train - 1))
-    n_test = n_samples - n_train - n_val
-    if n_test < 0:
-        raise ValueError("invalid split produced negative test size")
+    counts = np.floor(n_samples * fractions).astype(int)
+    minimums = (fractions > 0.0).astype(int)
+    counts = np.maximum(counts, minimums)
+    if counts.sum() > n_samples:
+        counts = minimums.copy()
+    else:
+        counts[-1] += n_samples - int(counts.sum())
+
+    n_train, n_val, n_test = (int(value) for value in counts)
     return (
         np.sort(indices[:n_train]),
         np.sort(indices[n_train : n_train + n_val]),
@@ -515,7 +524,7 @@ def _run_one_helprop_matrix(run: HelPropMatrixRun, timeout: float | None = None)
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate a numbered HelProp transfer-matrix dataset.")
     parser.add_argument("--helprop", default="./HelProp", help="Path to HelProp executable")
-    parser.add_argument("--runs-root", type=Path, default=Path("fno_runs"))
+    parser.add_argument("--run-root", type=Path, default=Path("fno_runs"))
     parser.add_argument("--run-dir", type=Path, default=None, help="Use this run directory instead of allocating one")
     parser.add_argument("--n-runs", type=int, default=200, help="Number of parameter points")
     parser.add_argument("--learn", nargs="+", default=["D0", "m"], help="Learned parameter names")
@@ -549,12 +558,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--timeout", type=float, default=None)
     parser.add_argument("--dry-run", action="store_true", help="Write manifests/config and print commands only")
+    parser.add_argument(
+        "--continue",
+        dest="continue_dir",
+        type=Path,
+        metavar="DIR",
+        help="Resume the matrix run stored in DIR using DIR/config.json and numbered BSON files",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    run_dir = args.run_dir or next_serial_run_dir(args.runs_root)
+    if args.continue_dir is not None:
+        return _continue_matrix_run(args.continue_dir)
+
+    run_dir = args.run_dir or next_serial_run_dir(args.run_root)
     run_dir.mkdir(parents=True, exist_ok=True)
     data_dir = run_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -606,6 +625,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest = data_dir / "manifest.csv"
     dataset_out = data_dir / "matrices.npz"
     config = {
+        "helprop": str(Path(args.helprop).resolve()),
         "learned": list(learned),
         "fixed": fixed,
         "ranges": {name: list(value) for name, value in ranges.items()},
@@ -621,6 +641,7 @@ def main(argv: list[str] | None = None) -> int:
         "val_fraction": args.val_fraction,
         "sample": bool(args.sample),
         "integer_params": list(args.integer_param),
+        "timeout": args.timeout,
     }
     ensure_unique_outputs([manifest, dataset_out, run_dir / "config.json", *[run.output for run in runs]])
     atomic_replace_text(run_dir / "config.json", json.dumps(config, indent=2, sort_keys=True))
@@ -628,7 +649,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"run_dir: {run_dir}")
     print(f"manifest: {manifest}")
 
-    run_helprop_matrices(runs, timeout=args.timeout, dry_run=args.dry_run, jobs=args.jobs)
+    run_helprop_matrices(
+        runs,
+        timeout=args.timeout,
+        dry_run=args.dry_run,
+        jobs=args.jobs,
+    )
     if args.dry_run:
         return 0
 
@@ -644,6 +670,89 @@ def main(argv: list[str] | None = None) -> int:
     print(f"dataset: {dataset_out}")
     print(f"split: train={train_idx.size} val={val_idx.size} test={test_idx.size}")
     return 0
+
+
+def _continue_matrix_run(run_dir: Path) -> int:
+    """Resume a matrix run using its saved config and numbered BSON files."""
+    run_dir = Path(run_dir)
+    config = _read_json(run_dir / "config.json")
+    data_dir = run_dir / "data"
+    learned = tuple(str(name) for name in config["learned"])
+    ranges = {
+        str(name): (float(bounds[0]), float(bounds[1]))
+        for name, bounds in config["ranges"].items()
+    }
+    choices = {
+        str(name): tuple(float(value) for value in values)
+        for name, values in config["choices"].items()
+    }
+    design = mixed_parameter_design(
+        learned,
+        ranges,
+        choices,
+        int(config["n_runs"]),
+        seed=int(config["seed"]),
+    )
+
+    runs = make_matrix_runs(
+        helprop=config["helprop"],
+        outdir=data_dir,
+        design=design,
+        etoa=config["etoa"],
+        elis=config["elis"],
+        number=int(config["number"]),
+        nthread=int(config["nthread"]),
+        seed=int(config["seed"]) if config.get("seed") is not None else None,
+        fixed_options=fixed_to_helprop_options(config["fixed"]),
+        sample=bool(config["sample"]),
+        integer_params=tuple(config.get("integer_params", [])),
+    )
+    manifest = data_dir / "manifest.csv"
+    write_matrix_manifest(manifest, runs)
+
+    completed = _existing_matrix_indices(data_dir)
+    pending = [run for run in runs if run.index not in completed]
+    print(f"run_dir: {run_dir}")
+    print(f"resuming: {len(pending)} of {len(runs)} matrices remaining ({len(completed)} found in data)")
+
+    run_helprop_matrices(
+        pending,
+        timeout=config.get("timeout"),
+        jobs=int(config["jobs"]),
+    )
+
+    dataset_out = data_dir / "matrices.npz"
+    dataset = consolidate_bson_matrices([run.output for run in runs], learned)
+    dataset.save_npz(dataset_out)
+    train_idx, val_idx, test_idx = split_indices(
+        dataset.theta.shape[0],
+        train_fraction=float(config["train_fraction"]),
+        val_fraction=float(config["val_fraction"]),
+        seed=int(config["seed"]),
+    )
+    write_split_files(data_dir, train_idx, val_idx, test_idx)
+    print(f"dataset: {dataset_out}")
+    print(f"split: train={train_idx.size} val={val_idx.size} test={test_idx.size}")
+    return 0
+
+
+def _read_json(path: str | Path) -> dict:
+    with Path(path).open("r", encoding="utf-8") as stream:
+        payload = json.load(stream)
+    if not isinstance(payload, dict):
+        raise ValueError(f"expected a JSON object in {path}")
+    return payload
+
+
+def _existing_matrix_indices(data_dir: Path) -> set[int]:
+    """Return completed matrix numbers present as final BSON files."""
+    indices = set()
+    for path in data_dir.glob("matrix_*.bson"):
+        try:
+            indices.add(int(path.stem.removeprefix("matrix_")))
+        except ValueError:
+            continue
+    return indices
 
 
 def _parse_ranges(specs: Sequence[str]) -> dict[str, tuple[float, float]]:
